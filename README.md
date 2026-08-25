@@ -2,23 +2,23 @@
 
 Jeppe's personal [pi](https://pi.dev) setup bundle.
 
-This is a parent/meta-package: it combines independently maintained Pi feature packages and shared UI primitives into one installable setup.
+This is the single installable Pi package for Jeppe's workflow. Feature boundaries remain modular inside the repository, but runtime users install one package: `@jephal/pi-setup`.
 
 ## Included features
 
-- [`pi-fovea`](https://github.com/jephal/pi-fovea/tree/jephal/safe-agent-only)
+- Fovea code graph (bundled separately while WIP)
   - Agent-only cross-language code graph and token-budgeted repository navigation
   - Explicit sketch/focus/dwell/impact tools; no graph UI
   - Safe defaults: no proactive turn sync, no grep interception, no credential-file indexing
   - Uses `ast-grep` for extraction; install it once with `npm install --global @ast-grep/cli@0.45.2`
-- [`pi-ask-questions`](https://github.com/jephal/pi-ask-questions)
+- Ask Questions
   - Keyboard-driven questionnaires
   - Inline option editing
   - Free-form answers
   - Optional ASCII visualizations
-- [`pi-ui`](../pi-ui)
+- Shared Pi UI primitives
   - Shared editable-option state and safe TUI rendering helpers
-- [`pi-approval-modes`](https://github.com/jephal/pi-approval-modes)
+- Approval modes
   - Manual approval mode
   - Approve-code-edits mode
   - Auto mode
@@ -35,12 +35,16 @@ This is a parent/meta-package: it combines independently maintained Pi feature p
   - Keeps only a small `datadog_search_tools` loader active in pi's context
   - Loads matching `core`, `error-tracking`, and `rum` tools on demand
   - Keeps Datadog credentials in the CLI's local OAuth store, not in this repository
-- [`pi-plan-mode`](../pi-plan-mode)
+- Plan mode
   - Branch/session-scoped plan storage
   - Concise plan review UI
   - Shared HITL decisions and feedback
   - Markdown task checkpoints and above-editor execution progress
   - Visible Plan → execution transitions
+- Memory
+  - Local SQLite-backed user and project memories
+  - Explicit save, search, update, and delete tools
+  - Optional core-memory injection and bounded archival recall
 - Native Pi subagent workflow
   - `scout`, `planner`, `reviewer`, `worker`, and `datadog-investigator` agents
   - Single, parallel, and chained isolated child sessions
@@ -48,10 +52,16 @@ This is a parent/meta-package: it combines independently maintained Pi feature p
 
 ## Install the complete setup
 
-From GitHub:
+From npm (recommended):
 
 ```bash
-pi install git:github.com/jephal/pi-setup@v0.0.6
+pi install npm:@jephal/pi-setup
+```
+
+From GitHub while developing:
+
+```bash
+pi install git:github.com/jephal/pi-setup@main
 ```
 
 Then reload Pi:
@@ -90,23 +100,17 @@ export DD_MCP_ENDPOINT_PATH='v1/mcp?toolsets=core,error-tracking,rum'
 The extension is intended for read-only investigation. Give the Datadog account
 `mcp_read` and resource read permissions, but not `mcp_write`.
 
-## Install features independently
-
-The feature packages can also be installed separately:
-
-```bash
-pi install git:github.com/jephal/pi-ask-questions#v0.0.1
-pi install git:github.com/jephal/pi-plan-mode#v0.0.1
-pi install git:github.com/jephal/pi-approval-modes#v0.0.1
-```
-
 ## Development
 
-This package is the local ecosystem root for the hand-rolled Pi packages. It references the feature packages as bundled dependencies and exposes their extension entry points through its `pi` manifest. `pi-plan-mode` is listed before `pi-approval-modes`; approval modes detect an existing `plan` tool and keep a standalone fallback without registering a duplicate.
+Stable Pi features are shipped from this repository as one package. Source remains organized by feature: extension entrypoints live under `extensions/`, and shared implementation lives under namespaced `src/` directories. Fovea remains a separately bundled dependency until its WIP branch is ready for consolidation.
 
-The sibling package directories remain independently publishable while being developed together through this setup package. Moving them into a new directory would break their current Git remotes and local `file:` links, so the setup package acts as the monorepo-style integration boundary for now.
+The original feature repositories remain available as sources, but new installs should use `@jephal/pi-setup`. The package manifest points directly at the consolidated local entrypoints, bundles the current Fovea package separately, and declares Pi's runtime packages as peer dependencies supplied by the host.
 
-Add future feature packages to `dependencies`, `bundledDependencies`, and `pi.extensions`.
+Run the local test suite with:
+
+```bash
+npm test
+```
 
 ## Subagents
 
