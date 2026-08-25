@@ -31,7 +31,7 @@ This is a parent/meta-package: it combines independently maintained Pi feature p
   - Markdown task checkpoints and above-editor execution progress
   - Visible Plan → execution transitions
 - Native Pi subagent workflow
-  - `scout`, `planner`, `reviewer`, and `worker` agents
+  - `scout`, `planner`, `reviewer`, `worker`, and `datadog-investigator` agents
   - Single, parallel, and chained isolated child sessions
   - `scout-and-plan`, `implement`, and `implement-and-review` prompts
 
@@ -100,10 +100,11 @@ Add future feature packages to `dependencies`, `bundledDependencies`, and `pi.ex
 The setup includes Pi's first-party subagent workflow with bundled defaults:
 
 ```text
-scout    → gpt-5.6-luna
-planner  → claude-opus-5
-reviewer → claude-opus-5
-worker   → gpt-5.6-terra
+scout              → gpt-5.6-luna
+planner            → claude-opus-5
+reviewer           → claude-opus-5
+worker             → gpt-5.6-terra
+datadog-investigator → gpt-5.6-luna
 ```
 
 Use the read-only workflow first:
