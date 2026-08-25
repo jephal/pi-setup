@@ -31,7 +31,7 @@ This is a parent/meta-package: it combines independently maintained Pi feature p
   - Markdown task checkpoints and above-editor execution progress
   - Visible Plan → execution transitions
 - Native Pi subagent workflow
-  - `scout`, `planner`, `reviewer`, and `worker` agents
+  - `scout`, `planner`, `reviewer`, `worker`, and `datadog-investigator` agents
   - Single, parallel, and chained isolated child sessions
   - `scout-and-plan`, `implement`, and `implement-and-review` prompts
 
@@ -52,7 +52,9 @@ Then reload Pi:
 ## Datadog MCP (OAuth)
 
 The setup includes a personal pi extension that bridges Datadog's official local MCP
-CLI into pi. Install the CLI once and authenticate with Datadog:
+CLI into pi. Datadog-aware subagents can forward their tool searches and calls to the
+parent pi process, so the OAuth-backed MCP client stays in the parent and is not
+recreated in every child process. Install the CLI once and authenticate with Datadog:
 
 ```bash
 curl -sSL https://coterm.datadoghq.com/mcp-cli/install.sh | bash
@@ -97,13 +99,26 @@ Add future feature packages to `dependencies`, `bundledDependencies`, and `pi.ex
 
 ## Subagents
 
-The setup includes Pi's first-party subagent workflow with bundled defaults:
+The setup includes Pi's first-party subagent workflow with bundled defaults. The
+`datadog-investigator` agent uses the lazy Datadog loader; when it runs as a child,
+Datadog tool metadata and calls are forwarded through a private per-child bridge to
+the parent process.
+
+The forwarding bridge is fail-closed, scoped to the Datadog tools exposed by the
+parent's configured MCP endpoint, and does not pass OAuth credentials to child
+processes.
 
 ```text
-scout    → gpt-5.6-luna
-planner  → claude-opus-5
-reviewer → claude-opus-5
-worker   → gpt-5.6-terra
+parent pi ── private Unix socket ──> child datadog tools
+    └── Datadog MCP client / OAuth CLI
+```
+
+```text
+scout              → gpt-5.6-luna
+planner            → claude-opus-5
+reviewer           → claude-opus-5
+worker             → gpt-5.6-terra
+datadog-investigator → gpt-5.6-luna
 ```
 
 Use the read-only workflow first:
