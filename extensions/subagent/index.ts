@@ -23,6 +23,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
+	type ExtensionContext,
 	getAgentDir,
 	getMarkdownTheme,
 	withFileMutationQueue,
@@ -30,6 +31,11 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import {
+	createMcpForwardingBridge,
+	getMcpForwardingProvider,
+	type McpForwardingBridge,
+} from "../mcp-forwarding.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -290,6 +296,7 @@ type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 async function runSingleAgent(
 	defaultCwd: string,
+	parentCtx: ExtensionContext,
 	agents: AgentConfig[],
 	agentName: string,
 	task: string,
@@ -317,10 +324,10 @@ async function runSingleAgent(
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	if (agent.model) args.push("--model", agent.model);
-	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	let forwardingBridge: McpForwardingBridge | undefined;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -344,6 +351,27 @@ async function runSingleAgent(
 	};
 
 	try {
+		const requiresDatadogForwarding = agent.tools?.includes("datadog_search_tools") === true;
+		const forwardingProvider = requiresDatadogForwarding ? getMcpForwardingProvider() : undefined;
+		if (requiresDatadogForwarding && !forwardingProvider) {
+			currentResult.exitCode = 1;
+			currentResult.errorMessage = "Datadog MCP forwarding is unavailable in the parent session.";
+			return currentResult;
+		}
+		if (forwardingProvider) {
+			try {
+				forwardingBridge = await createMcpForwardingBridge(forwardingProvider, parentCtx, signal);
+			} catch (error) {
+				currentResult.exitCode = 1;
+				currentResult.errorMessage = error instanceof Error ? error.message : String(error);
+				return currentResult;
+			}
+		}
+
+		const toolNames = new Set(agent.tools ?? []);
+		for (const toolName of forwardingBridge?.toolNames ?? []) toolNames.add(toolName);
+		if (toolNames.size > 0) args.push("--tools", [...toolNames].join(","));
+
 		if (agent.systemPrompt.trim()) {
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
 			tmpPromptDir = tmp.dir;
@@ -356,8 +384,15 @@ async function runSingleAgent(
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
+			const childEnv = { ...process.env };
+			if (forwardingBridge) Object.assign(childEnv, forwardingBridge.env);
+			else {
+				delete childEnv.PI_MCP_FORWARD_SOCKET;
+				delete childEnv.PI_MCP_FORWARD_TOKEN;
+			}
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
+				env: childEnv,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
@@ -449,6 +484,7 @@ async function runSingleAgent(
 			} catch {
 				/* ignore */
 			}
+		await forwardingBridge?.close();
 	}
 }
 
@@ -584,6 +620,7 @@ export default function (pi: ExtensionAPI) {
 
 					const result = await runSingleAgent(
 						ctx.cwd,
+						ctx,
 						agents,
 						step.agent,
 						taskWithContext,
@@ -656,6 +693,7 @@ export default function (pi: ExtensionAPI) {
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
 					const result = await runSingleAgent(
 						ctx.cwd,
+						ctx,
 						agents,
 						t.agent,
 						t.task,
@@ -698,6 +736,7 @@ export default function (pi: ExtensionAPI) {
 			if (params.agent && params.task) {
 				const result = await runSingleAgent(
 					ctx.cwd,
+					ctx,
 					agents,
 					params.agent,
 					params.task,

@@ -6,6 +6,15 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from '@earendil-wo
 import { Type, type TSchema } from 'typebox';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {
+  isMcpForwardingChild,
+  registerMcpForwardingProvider,
+  requestForwardedMcp,
+  unregisterMcpForwardingProvider,
+  type ForwardedToolDefinition,
+  type ForwardedToolResult,
+  type McpForwardingProvider,
+} from './mcp-forwarding.ts';
 
 const DEFAULT_SITE = 'us3';
 const DEFAULT_CLI_PATH = join(homedir(), '.local', 'bin', 'datadog_mcp_cli');
@@ -18,6 +27,7 @@ let connectionPromise: Promise<Client> | undefined;
 let toolsDiscovered = false;
 const registeredToolNames = new Set<string>();
 const remoteTools = new Map<string, McpTool>();
+const forwardedTools = new Map<string, ForwardedToolDefinition>();
 
 /**
  * Loads Datadog's official OAuth-backed MCP tools into pi.
@@ -26,6 +36,8 @@ const remoteTools = new Map<string, McpTool>();
  */
 export default function datadogMcpExtension(pi: ExtensionAPI): void {
   registerSearchTool(pi);
+  const forwardingProvider = createForwardingProvider(pi);
+  registerMcpForwardingProvider(forwardingProvider);
 
   pi.on('session_start', async (_event, ctx) => {
     const activeTools = pi.getActiveTools();
@@ -51,7 +63,7 @@ export default function datadogMcpExtension(pi: ExtensionAPI): void {
   pi.registerCommand('datadog-reset', {
     description: 'Unload active Datadog tools and keep only the Datadog tool searcher',
     handler: async (_args, ctx) => {
-      const remoteNames = new Set(remoteTools.keys());
+      const remoteNames = new Set([...remoteTools.keys(), ...forwardedTools.keys()]);
       const activeTools = pi.getActiveTools().filter((name) => !remoteNames.has(name));
       pi.setActiveTools([...new Set([...activeTools, SEARCH_TOOL_NAME])]);
       ctx.ui.notify('Datadog tools unloaded; datadog_search_tools remains available', 'info');
@@ -65,6 +77,8 @@ export default function datadogMcpExtension(pi: ExtensionAPI): void {
     toolsDiscovered = false;
     registeredToolNames.clear();
     remoteTools.clear();
+    forwardedTools.clear();
+    unregisterMcpForwardingProvider(forwardingProvider);
 
     if (connectedClient) {
       await connectedClient.close().catch(() => undefined);
@@ -167,31 +181,8 @@ function registerSearchTool(pi: ExtensionAPI): void {
       query: Type.String({ description: 'The Datadog capability to find, for example "highest impact error tracking issues".' }),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, description: 'Maximum number of matching tools to activate.' })),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const connectedClient = await connect(ctx);
-      await discoverTools(connectedClient, pi);
-
-      const matches = findToolMatches(params.query, params.limit ?? 5);
-      if (matches.length === 0) {
-        return {
-          content: [{ type: 'text', text: `No Datadog tools matched: ${params.query}` }],
-          details: { query: params.query, matches: [] },
-        };
-      }
-
-      const activeTools = pi.getActiveTools();
-      const addedTools = matches.filter((name) => !activeTools.includes(name));
-      pi.setActiveTools([...new Set([...activeTools, ...addedTools])]);
-
-      return {
-        content: [{
-          type: 'text',
-          text: addedTools.length > 0
-            ? `Activated Datadog tools: ${addedTools.join(', ')}`
-            : `Matching Datadog tools are already active: ${matches.join(', ')}`,
-        }],
-        details: { query: params.query, matches, addedTools },
-      };
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      return searchDatadogTools(params.query, params.limit ?? 5, pi, ctx, signal);
     },
   });
 }
@@ -242,32 +233,8 @@ function registerTool(remoteTool: McpTool, pi: ExtensionAPI): void {
     description: remoteTool.description ?? `Call the Datadog MCP tool ${remoteTool.name}.`,
     parameters,
     executionMode: 'sequential',
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const activeClient = await connect(ctx);
-      const result = await activeClient.callTool({
-        name: remoteTool.name,
-        arguments: params,
-      });
-
-      const output = JSON.stringify(result, null, 2) ?? String(result);
-      const truncated = truncateHead(output, {
-        maxBytes: DEFAULT_MAX_BYTES,
-        maxLines: DEFAULT_MAX_LINES,
-      });
-
-      return {
-        content: [{
-          type: 'text',
-          text: truncated.truncated
-            ? `${truncated.content}\n\n[Datadog output truncated: ${truncated.totalBytes} bytes, ${truncated.totalLines} lines]`
-            : truncated.content,
-        }],
-        details: {
-          remoteTool: remoteTool.name,
-          truncated: truncated.truncated,
-          isError: result.isError === true,
-        },
-      };
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      return callDatadogTool(remoteTool, params, ctx, signal);
     },
   });
 }
@@ -281,6 +248,296 @@ function registerTool(remoteTool: McpTool, pi: ExtensionAPI): void {
 function toPiToolName(remoteName: string): string {
   const normalized = remoteName.replace(/[^a-zA-Z0-9_]/g, '_');
   return `${TOOL_PREFIX}${normalized}`;
+}
+
+/**
+ * Creates the parent-side Datadog provider exposed to child subagents.
+ *
+ * @param pi - The parent extension API used to activate matching tools.
+ * @returns The forwarding provider.
+ */
+function createForwardingProvider(pi: ExtensionAPI): McpForwardingProvider {
+  return {
+    listTools: async (ctx: ExtensionContext): Promise<ForwardedToolDefinition[]> => {
+      if (isMcpForwardingChild()) {
+        return parseForwardedToolList(await requestForwardedMcp('tools/list'));
+      }
+      await ensureDatadogToolsDiscovered(pi, ctx);
+      return [...remoteTools.keys()].map((name) => toForwardedTool(name));
+    },
+    searchTools: (query: string, limit: number, ctx: ExtensionContext, signal?: AbortSignal) =>
+      isMcpForwardingChild()
+        ? requestForwardedMcp('tools/search', { query, limit }, signal).then(parseForwardedSearchResponse)
+        : searchForwardedDatadogTools(query, limit, pi, ctx),
+    callTool: (name: string, arguments_: Record<string, unknown>, signal: AbortSignal | undefined, ctx: ExtensionContext) =>
+      isMcpForwardingChild()
+        ? requestForwardedMcp('tools/call', { name, arguments: arguments_ }, signal) as Promise<ForwardedToolResult>
+        : callForwardedDatadogTool(name, arguments_, ctx, signal),
+  };
+}
+
+/**
+ * Ensures the parent or local Datadog tool registry has been populated.
+ *
+ * @param pi - Current extension API.
+ * @param ctx - Current extension context.
+ * @returns Nothing when discovery has completed.
+ */
+async function ensureDatadogToolsDiscovered(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  if (isMcpForwardingChild()) return;
+  const connectedClient = await connect(ctx);
+  await discoverTools(connectedClient, pi);
+}
+
+/**
+ * Searches and activates Datadog tools either locally or through the parent bridge.
+ *
+ * @param query - Search phrase for Datadog capabilities.
+ * @param limit - Maximum number of matching tools.
+ * @param pi - Current extension API.
+ * @param ctx - Current extension context.
+ * @returns A standard Pi tool result.
+ */
+async function searchDatadogTools(
+  query: string,
+  limit: number,
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  signal: AbortSignal | undefined,
+) {
+  if (isMcpForwardingChild()) {
+    const forwarded = parseForwardedSearchResponse(
+      await requestForwardedMcp('tools/search', { query, limit }, signal),
+    );
+    for (const tool of forwarded.matches) {
+      forwardedTools.set(tool.name, tool);
+      registerForwardedTool(tool, pi);
+    }
+    const activeTools = pi.getActiveTools();
+    const addedTools = forwarded.matches
+      .map((tool) => tool.name)
+      .filter((name) => !activeTools.includes(name));
+    pi.setActiveTools([...new Set([...activeTools, ...addedTools])]);
+    return {
+      content: [{
+        type: 'text' as const,
+        text: forwarded.matches.length === 0
+          ? `No Datadog tools matched: ${query}`
+          : addedTools.length > 0
+            ? `Activated Datadog tools through parent: ${addedTools.join(', ')}`
+            : `Matching Datadog tools are already active through parent: ${forwarded.matches.map((tool) => tool.name).join(', ')}`,
+      }],
+      details: { query, matches: forwarded.matches.map((tool) => tool.name), addedTools },
+      addedToolNames: addedTools,
+    };
+  }
+
+  await ensureDatadogToolsDiscovered(pi, ctx);
+  const matches = findToolMatches(query, limit);
+  const activeTools = pi.getActiveTools();
+  const addedTools = matches.filter((name) => !activeTools.includes(name));
+  pi.setActiveTools([...new Set([...activeTools, ...addedTools])]);
+
+  return {
+    content: [{
+      type: 'text' as const,
+      text: addedTools.length > 0
+        ? `Activated Datadog tools: ${addedTools.join(', ')}`
+        : matches.length > 0
+          ? `Matching Datadog tools are already active: ${matches.join(', ')}`
+          : `No Datadog tools matched: ${query}`,
+    }],
+    details: { query, matches, addedTools },
+    addedToolNames: addedTools,
+  };
+}
+
+/**
+ * Parses a tool list received from the parent bridge.
+ *
+ * @param value - Untrusted bridge response.
+ * @returns Validated forwarded tool definitions.
+ * @throws When the response contains an invalid tool definition.
+ */
+function parseForwardedToolList(value: unknown): ForwardedToolDefinition[] {
+  if (!Array.isArray(value) || value.some((tool) => !isForwardedToolDefinition(tool))) {
+    throw new Error('MCP forwarding returned an invalid Datadog tool list.');
+  }
+  return value;
+}
+
+/**
+ * Parses a search response received from the parent bridge.
+ *
+ * @param value - Untrusted bridge response.
+ * @returns Validated forwarded search result.
+ * @throws When the response shape or tool definitions are invalid.
+ */
+function parseForwardedSearchResponse(value: unknown): {
+  matches: ForwardedToolDefinition[];
+  addedTools: string[];
+} {
+  if (!isRecord(value) || !Array.isArray(value.matches) || !Array.isArray(value.addedTools)) {
+    throw new Error('MCP forwarding returned an invalid Datadog search response.');
+  }
+  const matches = value.matches.filter(isForwardedToolDefinition);
+  if (
+    matches.length !== value.matches.length
+    || value.addedTools.some(
+      (name) => typeof name !== 'string' || !name.startsWith(TOOL_PREFIX) || name.includes(',') || name === SEARCH_TOOL_NAME,
+    )
+  ) {
+    throw new Error('MCP forwarding returned an invalid Datadog tool definition.');
+  }
+  return { matches, addedTools: value.addedTools as string[] };
+}
+
+/**
+ * Checks whether a value is a safe forwarded Datadog tool definition.
+ *
+ * @param value - Value to inspect.
+ * @returns True when the definition has a prefixed name and object schema.
+ */
+function isForwardedToolDefinition(value: unknown): value is ForwardedToolDefinition {
+  return isRecord(value)
+    && typeof value.name === 'string'
+    && value.name.startsWith(TOOL_PREFIX)
+    && !value.name.includes(',')
+    && value.name !== SEARCH_TOOL_NAME
+    && typeof value.description === 'string'
+    && isRecord(value.parameters);
+}
+
+/**
+ * Checks whether a value is a plain record.
+ *
+ * @param value - Value to inspect.
+ * @returns True when the value is a non-null non-array object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Registers one tool definition received from the parent bridge.
+ *
+ * @param tool - Forwarded Pi-compatible tool definition.
+ * @param pi - Child extension API.
+ */
+function registerForwardedTool(tool: ForwardedToolDefinition, pi: ExtensionAPI): void {
+  if (!isForwardedToolDefinition(tool) || registeredToolNames.has(tool.name)) return;
+  registeredToolNames.add(tool.name);
+  pi.registerTool({
+    name: tool.name,
+    label: `Datadog: ${tool.name}`,
+    description: tool.description,
+    parameters: Type.Unsafe<Record<string, unknown>>(tool.parameters as TSchema),
+    executionMode: 'sequential',
+    async execute(_toolCallId, params, signal) {
+      return requestForwardedMcp('tools/call', { name: tool.name, arguments: params }, signal) as Promise<ForwardedToolResult>;
+    },
+  });
+}
+
+/**
+ * Converts a parent-side Datadog tool into a child-safe definition.
+ *
+ * @param piToolName - Prefixed Pi tool name.
+ * @returns Serialized tool metadata safe to send to a child.
+ * @throws When the tool is not registered in the parent.
+ */
+function toForwardedTool(piToolName: string): ForwardedToolDefinition {
+  const remoteTool = remoteTools.get(piToolName);
+  if (!remoteTool) throw new Error(`Unknown Datadog tool: ${piToolName}`);
+  return {
+    name: piToolName,
+    description: remoteTool.description ?? `Call the Datadog MCP tool ${remoteTool.name}.`,
+    parameters: remoteTool.inputSchema as Record<string, unknown>,
+  };
+}
+
+/**
+ * Searches parent-side Datadog tools and activates matching tools in the parent.
+ *
+ * @param query - Search phrase for Datadog capabilities.
+ * @param limit - Maximum number of matches.
+ * @param pi - Parent extension API.
+ * @param ctx - Parent extension context.
+ * @returns Matching definitions and newly activated tool names.
+ */
+async function searchForwardedDatadogTools(
+  query: string,
+  limit: number,
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+): Promise<{ matches: ForwardedToolDefinition[]; addedTools: string[] }> {
+  await ensureDatadogToolsDiscovered(pi, ctx);
+  const matches = findToolMatches(query, limit).map((name) => toForwardedTool(name));
+  return { matches, addedTools: [] };
+}
+
+/**
+ * Calls one parent-side Datadog MCP tool and serializes its output for Pi.
+ *
+ * @param name - Prefixed Pi tool name.
+ * @param arguments_ - Tool arguments.
+ * @param ctx - Parent extension context.
+ * @returns Serialized tool result.
+ * @throws When the tool is unknown or the MCP call fails.
+ */
+async function callForwardedDatadogTool(
+  name: string,
+  arguments_: Record<string, unknown>,
+  ctx: ExtensionContext,
+  signal: AbortSignal | undefined,
+): Promise<ForwardedToolResult> {
+  const remoteTool = remoteTools.get(name);
+  if (!remoteTool) throw new Error(`Unknown Datadog tool: ${name}`);
+  return callDatadogTool(remoteTool, arguments_, ctx, signal);
+}
+
+/**
+ * Calls a Datadog MCP tool and formats its result consistently for parent and child Pi.
+ *
+ * @param remoteTool - Datadog MCP tool definition.
+ * @param arguments_ - Tool arguments.
+ * @param ctx - Extension context.
+ * @returns Serialized tool result.
+ */
+async function callDatadogTool(
+  remoteTool: McpTool,
+  arguments_: Record<string, unknown>,
+  ctx: ExtensionContext,
+  signal: AbortSignal | undefined = undefined,
+): Promise<ForwardedToolResult> {
+  const activeClient = await connect(ctx);
+  const result = await activeClient.callTool(
+    { name: remoteTool.name, arguments: arguments_ },
+    undefined,
+    signal ? { signal } : undefined,
+  );
+  const output = JSON.stringify(result, null, 2) ?? String(result);
+  const truncated = truncateHead(output, {
+    maxBytes: DEFAULT_MAX_BYTES,
+    maxLines: DEFAULT_MAX_LINES,
+  });
+  if (result.isError === true) {
+    throw new Error(`Datadog MCP tool failed: ${truncated.content}`);
+  }
+  return {
+    content: [{
+      type: 'text',
+      text: truncated.truncated
+        ? `${truncated.content}\n\n[Datadog output truncated: ${truncated.totalBytes} bytes, ${truncated.totalLines} lines]`
+        : truncated.content,
+    }],
+    details: {
+      remoteTool: remoteTool.name,
+      truncated: truncated.truncated,
+      isError: result.isError === true,
+    },
+    isError: result.isError === true,
+  };
 }
 
 /**
