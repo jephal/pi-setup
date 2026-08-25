@@ -2,7 +2,7 @@
 
 Jeppe's personal [pi](https://pi.dev) setup bundle.
 
-This is the single installable Pi package for Jeppe's workflow. Feature boundaries remain modular inside the repository, but runtime users install one package: `@jephal/pi-setup`.
+This is the single GitHub-installable Pi package for Jeppe's workflow. Feature boundaries remain modular inside the repository, but runtime users install one package: `@jephal/pi-setup`.
 
 ## Included features
 
@@ -52,17 +52,13 @@ This is the single installable Pi package for Jeppe's workflow. Feature boundari
 
 ## Install the complete setup
 
-From npm (recommended):
-
-```bash
-pi install npm:@jephal/pi-setup
-```
-
-From GitHub while developing:
+From GitHub (recommended):
 
 ```bash
 pi install git:github.com/jephal/pi-setup@main
 ```
+
+An npm package name is reserved for a future release, but npm publication is not required for this setup.
 
 Then reload Pi:
 
