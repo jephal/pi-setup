@@ -40,7 +40,7 @@ This is a parent/meta-package: it combines independently maintained Pi feature p
 From GitHub:
 
 ```bash
-pi install git:github.com/jephal/pi-setup#v0.0.2
+pi install git:github.com/jephal/pi-setup@v0.0.6
 ```
 
 Then reload Pi:
