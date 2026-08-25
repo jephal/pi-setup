@@ -24,6 +24,12 @@ This is a parent/meta-package: it combines independently maintained Pi feature p
   - Auto mode
   - Review mode
   - Shared approval HITL UI
+- Herdr shell integration
+  - Gives Pi a `herdr_shell` tool for long-running commands and local servers
+  - Creates one right-side pane in the current Herdr tab, never a new tab or workspace
+  - Runs commands in the pane without blocking Pi
+  - Reads bounded recent output back through Herdr's supported `pane read` API
+  - Uses normal `bash` for short commands whose output Pi needs immediately
 - Datadog MCP
   - Connects pi to Datadog through the official OAuth-backed local MCP CLI
   - Keeps only a small `datadog_search_tools` loader active in pi's context
@@ -140,5 +146,28 @@ Implementation workflows are also available:
 ```
 
 The setup installs missing default agent definitions into `~/.pi/agent/agents/` without overwriting existing files. Project-local agents remain opt-in and require confirmation.
+
+### Herdr shell integration
+
+When Pi runs inside Herdr (`HERDR_ENV=1`), the `herdr_shell` tool lets the model place long-lived processes in a right-side pane while keeping the Pi pane visible:
+
+```text
+herdr_shell({ action: "open", command: "pnpm dev" })
+herdr_shell({ action: "read_output", lines: 80 })
+herdr_shell({ action: "status" })
+herdr_shell({ action: "close" })
+```
+
+The integration creates a right-side pane in the current tab with `herdr pane split --current --direction right --no-focus`, then runs the command in that pane. It does not create a new tab or workspace. `read_output` uses `herdr pane read --source recent-unwrapped`, so the model can inspect the same recent output that is visible in Herdr. Output is bounded; it does not wait for a development server to exit.
+
+Use Pi's built-in `bash` tool for short-lived commands whose stdout/stderr the model needs in the current turn. Use `herdr_shell` for development servers, watchers, log processes, and other commands that should keep running visibly in Herdr. Reload Pi after updating the package:
+
+```text
+/reload
+```
+
+Herdr is optional. If Pi is not running inside Herdr, `herdr_shell` returns an explanatory error and normal `bash` remains available. Set `HERDR_BIN` if the Herdr executable is not on `PATH`. The minimum supported Herdr version is `0.7.5`.
+
+Herdr panes are intentionally not closed when Pi reloads or exits. Ask the model to use `action: "close"`, or stop the process in Herdr, when the server should end.
 
 For reproducible releases, replace `#main` references with version tags such as `#v0.1.0` after tagging the feature repositories.

@@ -43,7 +43,8 @@
       "node_modules/pi-approval-modes/extensions/approval-modes.ts",
       "node_modules/pi-memory/extensions/memory.ts",
       "node_modules/pi-fovea/src/index.ts",
-      "extensions/datadog-mcp.ts"
+      "extensions/datadog-mcp.ts",
+      "extensions/herdr-shell.ts"
     ],
     "prompts": [
       "prompts/*.md"
