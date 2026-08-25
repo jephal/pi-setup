@@ -1,6 +1,6 @@
 {
   "name": "pi-setup",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Jeppe's shared pi setup and feature bundle",
   "repository": "https://github.com/jephal/pi-setup.git",
   "homepage": "https://github.com/jephal/pi-setup#readme",
@@ -23,13 +23,15 @@
     "pi-approval-modes": "git+https://github.com/jephal/pi-approval-modes.git#v0.0.1",
     "pi-ask-questions": "git+https://github.com/jephal/pi-ask-questions.git#v0.0.1",
     "pi-plan-mode": "git+https://github.com/jephal/pi-plan-mode.git#v0.0.1",
-    "pi-ui": "git+https://github.com/jephal/pi-ui.git#v0.0.1"
+    "pi-ui": "git+https://github.com/jephal/pi-ui.git#v0.0.1",
+    "pi-memory": "git+https://github.com/jephal/pi-memory.git#v0.0.1"
   },
   "bundledDependencies": [
     "pi-ask-questions",
     "pi-approval-modes",
     "pi-plan-mode",
-    "pi-ui"
+    "pi-ui",
+    "pi-memory"
   ],
   "pi": {
     "extensions": [
@@ -37,6 +39,7 @@
       "node_modules/pi-ask-questions/extensions/ask-questions.ts",
       "node_modules/pi-plan-mode/extensions/plan-mode.ts",
       "node_modules/pi-approval-modes/extensions/approval-modes.ts",
+      "node_modules/pi-memory/extensions/memory.ts",
       "extensions/datadog-mcp.ts"
     ],
     "prompts": [
@@ -47,6 +50,7 @@
     "pi-ask-questions",
     "pi-approval-modes",
     "pi-plan-mode",
-    "pi-ui"
+    "pi-ui",
+    "pi-memory"
   ]
 }
