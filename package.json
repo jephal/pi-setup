@@ -1,7 +1,10 @@
 {
-  "name": "pi-setup",
-  "version": "0.0.6",
-  "description": "Jeppe's shared pi setup and feature bundle",
+  "name": "@jephal/pi-setup",
+  "version": "0.1.0",
+  "description": "Jeppe's consolidated Pi setup with planning, approvals, memory, Fovea, Herdr, and subagents",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": "https://github.com/jephal/pi-setup.git",
   "homepage": "https://github.com/jephal/pi-setup#readme",
   "keywords": [
@@ -15,34 +18,35 @@
     "README.md",
     "LICENSE",
     "extensions",
+    "src",
+    "skills",
     "agents",
     "prompts"
   ],
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "pi-approval-modes": "git+https://github.com/jephal/pi-approval-modes.git#v0.0.1",
-    "pi-ask-questions": "git+https://github.com/jephal/pi-ask-questions.git#v0.0.1",
-    "pi-plan-mode": "git+https://github.com/jephal/pi-plan-mode.git#v0.0.1",
-    "pi-ui": "git+https://github.com/jephal/pi-ui.git#v0.0.1",
-    "pi-memory": "git+https://github.com/jephal/pi-memory.git#v0.0.3",
-    "pi-fovea": "git+https://github.com/jephal/pi-fovea.git#v0.18.4-agent-safe.1"
+  "scripts": {
+    "test": "node --experimental-strip-types --test extensions/*.test.ts"
   },
-  "bundledDependencies": [
-    "pi-ask-questions",
-    "pi-approval-modes",
-    "pi-plan-mode",
-    "pi-ui",
-    "pi-memory",
-    "pi-fovea"
-  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
   "pi": {
     "extensions": [
       "extensions/subagent/index.ts",
-      "node_modules/pi-ask-questions/extensions/ask-questions.ts",
-      "node_modules/pi-plan-mode/extensions/plan-mode.ts",
-      "node_modules/pi-approval-modes/extensions/approval-modes.ts",
-      "node_modules/pi-memory/extensions/memory.ts",
-      "node_modules/pi-fovea/src/index.ts",
+      "extensions/ask-questions.ts",
+      "extensions/plan-mode.ts",
+      "extensions/approval-modes.ts",
+      "extensions/memory.ts",
+      "src/fovea/index.ts",
       "extensions/datadog-mcp.ts",
       "extensions/herdr-shell.ts"
     ],
@@ -50,15 +54,7 @@
       "prompts/*.md"
     ],
     "skills": [
-      "node_modules/pi-fovea/skills"
+      "skills/pi-fovea"
     ]
-  },
-  "bundleDependencies": [
-    "pi-ask-questions",
-    "pi-approval-modes",
-    "pi-plan-mode",
-    "pi-ui",
-    "pi-memory",
-    "pi-fovea"
-  ]
+  }
 }
