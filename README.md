@@ -6,7 +6,7 @@ This is the single installable Pi package for Jeppe's workflow. Feature boundari
 
 ## Included features
 
-- Fovea code graph
+- Fovea code graph (bundled separately while WIP)
   - Agent-only cross-language code graph and token-budgeted repository navigation
   - Explicit sketch/focus/dwell/impact tools; no graph UI
   - Safe defaults: no proactive turn sync, no grep interception, no credential-file indexing
@@ -102,9 +102,9 @@ The extension is intended for read-only investigation. Give the Datadog account
 
 ## Development
 
-All Pi features are shipped from this repository as one package. Source remains organized by feature: extension entrypoints live under `extensions/`, shared implementation lives under namespaced `src/` directories, and Fovea's skill lives under `skills/pi-fovea/`.
+Stable Pi features are shipped from this repository as one package. Source remains organized by feature: extension entrypoints live under `extensions/`, and shared implementation lives under namespaced `src/` directories. Fovea remains a separately bundled dependency until its WIP branch is ready for consolidation.
 
-The original feature repositories remain available as historical sources, but new installs should use `@jephal/pi-setup`. The package manifest points directly at the consolidated local entrypoints and declares only true external dependencies; Pi's own runtime packages are peer dependencies supplied by the host.
+The original feature repositories remain available as sources, but new installs should use `@jephal/pi-setup`. The package manifest points directly at the consolidated local entrypoints, bundles the current Fovea package separately, and declares Pi's runtime packages as peer dependencies supplied by the host.
 
 Run the local test suite with:
 

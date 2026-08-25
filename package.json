@@ -1,7 +1,7 @@
 {
   "name": "@jephal/pi-setup",
   "version": "0.1.0",
-  "description": "Jeppe's consolidated Pi setup with planning, approvals, memory, Fovea, Herdr, and subagents",
+  "description": "Jeppe's consolidated Pi setup with planning, approvals, memory, Herdr, and subagents",
   "publishConfig": {
     "access": "public"
   },
@@ -30,7 +30,8 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "pi-fovea": "git+https://github.com/jephal/pi-fovea.git#v0.18.4-agent-safe.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
@@ -46,7 +47,7 @@
       "extensions/plan-mode.ts",
       "extensions/approval-modes.ts",
       "extensions/memory.ts",
-      "src/fovea/index.ts",
+      "node_modules/pi-fovea/src/index.ts",
       "extensions/datadog-mcp.ts",
       "extensions/herdr-shell.ts"
     ],
@@ -54,7 +55,13 @@
       "prompts/*.md"
     ],
     "skills": [
-      "skills/pi-fovea"
+      "node_modules/pi-fovea/skills"
     ]
-  }
+  },
+  "bundledDependencies": [
+    "pi-fovea"
+  ],
+  "bundleDependencies": [
+    "pi-fovea"
+  ]
 }
