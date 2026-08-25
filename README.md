@@ -6,6 +6,11 @@ This is a parent/meta-package: it combines independently maintained Pi feature p
 
 ## Included features
 
+- [`pi-fovea`](https://github.com/jephal/pi-fovea/tree/jephal/safe-agent-only)
+  - Agent-only cross-language code graph and token-budgeted repository navigation
+  - Explicit sketch/focus/dwell/impact tools; no graph UI
+  - Safe defaults: no proactive turn sync, no grep interception, no credential-file indexing
+  - Uses `ast-grep` for extraction; install it once with `npm install --global @ast-grep/cli@0.45.2`
 - [`pi-ask-questions`](https://github.com/jephal/pi-ask-questions)
   - Keyboard-driven questionnaires
   - Inline option editing

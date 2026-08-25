@@ -24,14 +24,16 @@
     "pi-ask-questions": "git+https://github.com/jephal/pi-ask-questions.git#v0.0.1",
     "pi-plan-mode": "git+https://github.com/jephal/pi-plan-mode.git#v0.0.1",
     "pi-ui": "git+https://github.com/jephal/pi-ui.git#v0.0.1",
-    "pi-memory": "git+https://github.com/jephal/pi-memory.git#v0.0.3"
+    "pi-memory": "git+https://github.com/jephal/pi-memory.git#v0.0.3",
+    "pi-fovea": "git+https://github.com/jephal/pi-fovea.git#v0.18.4-agent-safe.1"
   },
   "bundledDependencies": [
     "pi-ask-questions",
     "pi-approval-modes",
     "pi-plan-mode",
     "pi-ui",
-    "pi-memory"
+    "pi-memory",
+    "pi-fovea"
   ],
   "pi": {
     "extensions": [
@@ -40,10 +42,14 @@
       "node_modules/pi-plan-mode/extensions/plan-mode.ts",
       "node_modules/pi-approval-modes/extensions/approval-modes.ts",
       "node_modules/pi-memory/extensions/memory.ts",
+      "node_modules/pi-fovea/src/index.ts",
       "extensions/datadog-mcp.ts"
     ],
     "prompts": [
       "prompts/*.md"
+    ],
+    "skills": [
+      "node_modules/pi-fovea/skills"
     ]
   },
   "bundleDependencies": [
@@ -51,6 +57,7 @@
     "pi-approval-modes",
     "pi-plan-mode",
     "pi-ui",
-    "pi-memory"
+    "pi-memory",
+    "pi-fovea"
   ]
 }
