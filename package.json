@@ -1,6 +1,6 @@
 {
   "name": "pi-setup",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Jeppe's shared pi setup and feature bundle",
   "repository": "https://github.com/jephal/pi-setup.git",
   "homepage": "https://github.com/jephal/pi-setup#readme",
@@ -24,7 +24,7 @@
     "pi-ask-questions": "git+https://github.com/jephal/pi-ask-questions.git#v0.0.1",
     "pi-plan-mode": "git+https://github.com/jephal/pi-plan-mode.git#v0.0.1",
     "pi-ui": "git+https://github.com/jephal/pi-ui.git#v0.0.1",
-    "pi-memory": "git+https://github.com/jephal/pi-memory.git#v0.0.1"
+    "pi-memory": "git+https://github.com/jephal/pi-memory.git#v0.0.2"
   },
   "bundledDependencies": [
     "pi-ask-questions",
