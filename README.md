@@ -19,19 +19,28 @@ This is a parent/meta-package: it combines independently maintained Pi feature p
   - Auto mode
   - Review mode
   - Shared approval HITL UI
+- Datadog MCP
+  - Connects pi to Datadog through the official OAuth-backed local MCP CLI
+  - Keeps only a small `datadog_search_tools` loader active in pi's context
+  - Loads matching `core`, `error-tracking`, and `rum` tools on demand
+  - Keeps Datadog credentials in the CLI's local OAuth store, not in this repository
 - [`pi-plan-mode`](../pi-plan-mode)
   - Branch/session-scoped plan storage
   - Concise plan review UI
   - Shared HITL decisions and feedback
   - Markdown task checkpoints and above-editor execution progress
   - Visible Plan → execution transitions
+- Native Pi subagent workflow
+  - `scout`, `planner`, `reviewer`, and `worker` agents
+  - Single, parallel, and chained isolated child sessions
+  - `scout-and-plan`, `implement`, and `implement-and-review` prompts
 
 ## Install the complete setup
 
 From GitHub:
 
 ```bash
-pi install git:github.com/jephal/pi-setup#v0.0.1
+pi install git:github.com/jephal/pi-setup#v0.0.2
 ```
 
 Then reload Pi:
@@ -39,6 +48,34 @@ Then reload Pi:
 ```text
 /reload
 ```
+
+## Datadog MCP (OAuth)
+
+The setup includes a personal pi extension that bridges Datadog's official local MCP
+CLI into pi. Install the CLI once and authenticate with Datadog:
+
+```bash
+curl -sSL https://coterm.datadoghq.com/mcp-cli/install.sh | bash
+~/.local/bin/datadog_mcp_cli --site us3 login
+```
+
+The login command opens the Datadog OAuth flow in a browser. After completing it,
+restart pi or run `/datadog-connect`. The extension uses the US3 endpoint and makes
+`core`, `error-tracking`, and `rum` tools searchable on demand. Only the small
+`datadog_search_tools` loader is active initially, so Datadog tool definitions do not
+bloat every session. Run `/datadog-reset` after an investigation to unload any
+Datadog tools activated during the session.
+
+Optional environment variables:
+
+```bash
+export DD_MCP_CLI="$HOME/.local/bin/datadog_mcp_cli"
+export DD_MCP_SITE=us3
+export DD_MCP_ENDPOINT_PATH='v1/mcp?toolsets=core,error-tracking,rum'
+```
+
+The extension is intended for read-only investigation. Give the Datadog account
+`mcp_read` and resource read permissions, but not `mcp_write`.
 
 ## Install features independently
 
@@ -57,5 +94,31 @@ This package is the local ecosystem root for the hand-rolled Pi packages. It ref
 The sibling package directories remain independently publishable while being developed together through this setup package. Moving them into a new directory would break their current Git remotes and local `file:` links, so the setup package acts as the monorepo-style integration boundary for now.
 
 Add future feature packages to `dependencies`, `bundledDependencies`, and `pi.extensions`.
+
+## Subagents
+
+The setup includes Pi's first-party subagent workflow with bundled defaults:
+
+```text
+scout    → gpt-5.6-luna
+planner  → claude-opus-5
+reviewer → claude-opus-5
+worker   → gpt-5.6-terra
+```
+
+Use the read-only workflow first:
+
+```text
+/scout-and-plan <task>
+```
+
+Implementation workflows are also available:
+
+```text
+/implement <task>
+/implement-and-review <task>
+```
+
+The setup installs missing default agent definitions into `~/.pi/agent/agents/` without overwriting existing files. Project-local agents remain opt-in and require confirmation.
 
 For reproducible releases, replace `#main` references with version tags such as `#v0.1.0` after tagging the feature repositories.
