@@ -30,6 +30,8 @@ export interface MemorySearchOptions {
 	scopes?: MemoryScope[];
 	limit?: number;
 	recordUsage?: boolean;
+	/** Exclude memories older than this many days from the result. */
+	maxAgeDays?: number;
 }
 
 export interface MemoryUpdate {

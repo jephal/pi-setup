@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import { rankMemories } from "./ranking.js";
+import { isMemoryStale, rankMemories } from "./ranking.ts";
 import type {
 	MemoryCategory,
 	MemoryRecord,
@@ -117,7 +117,35 @@ export class MemoryStore {
 		alwaysInject?: boolean;
 		source?: MemorySource;
 	}): MemoryRecord {
+		const content = input.content.trim();
+		if (!content) throw new Error("Memory content cannot be empty");
 		const now = new Date().toISOString();
+		const tagsJson = JSON.stringify(normalizeTags(input.tags));
+		const importance = Math.max(0, Math.min(1, input.importance));
+		const existing = this.db.prepare(`
+			SELECT * FROM memories
+			WHERE deleted_at IS NULL AND scope = ? AND category = ? AND lower(trim(content)) = lower(?)
+			LIMIT 1
+		`).get(input.scope, input.category, content) as Row | undefined;
+		if (existing) {
+			const record = toRecord(existing);
+			this.db.prepare(`
+				UPDATE memories
+				SET tags_json = ?, importance = ?, always_inject = ?, confirmation_count = confirmation_count + 1,
+				    updated_at = ?, last_used_at = ?, source_json = ?
+				WHERE id = ? AND deleted_at IS NULL
+			`).run(
+				tagsJson,
+				Math.max(record.importance, importance),
+				input.alwaysInject ? 1 : record.alwaysInject ? 1 : 0,
+				now,
+				now,
+				input.source ? JSON.stringify(input.source) : existing.source_json,
+				record.id,
+			);
+			return this.get(record.id)!;
+		}
+
 		const id = `mem_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		this.db.prepare(`
 			INSERT INTO memories
@@ -125,11 +153,11 @@ export class MemoryStore {
 			VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
 		`).run(
 			id,
-			input.content.trim(),
+			content,
 			input.scope,
 			input.category,
-			JSON.stringify(normalizeTags(input.tags)),
-			Math.max(0, Math.min(1, input.importance)),
+			tagsJson,
+			importance,
 			input.alwaysInject ? 1 : 0,
 			now,
 			now,
@@ -148,7 +176,10 @@ export class MemoryStore {
 			ORDER BY importance DESC, updated_at DESC
 			LIMIT 2000
 		`).all(...scopes) as Row[];
-		const ranked = rankMemories(rows.map(toRecord), query).filter((result) => result.score > 0 || !query.trim()).slice(0, limit);
+		const records = rows.map(toRecord).filter((record) =>
+			options.maxAgeDays === undefined || !isMemoryStale(record, options.maxAgeDays),
+		);
+		const ranked = rankMemories(records, query).filter((result) => result.score > 0 || !query.trim()).slice(0, limit);
 		if (options.recordUsage !== false && ranked.length > 0) {
 			this.transaction(() => {
 				const now = new Date().toISOString();
@@ -163,15 +194,18 @@ export class MemoryStore {
 		return this.search("", { ...options, recordUsage: false });
 	}
 
-	core(options: { limit?: number; maxChars?: number } = {}): MemoryRecord[] {
+	core(options: { limit?: number; maxChars?: number; maxAgeDays?: number } = {}): MemoryRecord[] {
 		const limit = Math.max(1, Math.min(options.limit ?? 10, 50));
 		const rows = this.db.prepare(`
 			SELECT * FROM memories
 			WHERE deleted_at IS NULL AND scope = 'user' AND always_inject = 1
 			ORDER BY importance DESC, confirmation_count DESC, updated_at DESC
-			LIMIT ?
-		`).all(limit) as Row[];
-		const records = rows.map(toRecord);
+			LIMIT 2000
+		`).all() as Row[];
+		const records = rows
+			.map(toRecord)
+			.filter((record) => options.maxAgeDays === undefined || !isMemoryStale(record, options.maxAgeDays))
+			.slice(0, limit);
 		if (options.maxChars === undefined) return records;
 		let used = 0;
 		return records.filter((record) => {
@@ -197,9 +231,10 @@ export class MemoryStore {
 		if (changes.alwaysInject !== undefined) next.alwaysInject = changes.alwaysInject;
 		this.db.prepare(`
 			UPDATE memories
-			SET content = ?, scope = ?, category = ?, tags_json = ?, importance = ?, always_inject = ?, updated_at = ?
+			SET content = ?, scope = ?, category = ?, tags_json = ?, importance = ?, always_inject = ?,
+				updated_at = ?, last_used_at = ?, confirmation_count = confirmation_count + 1
 			WHERE id = ? AND deleted_at IS NULL
-		`).run(next.content.trim(), next.scope, next.category, JSON.stringify(next.tags), Math.max(0, Math.min(1, next.importance)), next.alwaysInject ? 1 : 0, next.updatedAt, id);
+		`).run(next.content.trim(), next.scope, next.category, JSON.stringify(next.tags), Math.max(0, Math.min(1, next.importance)), next.alwaysInject ? 1 : 0, next.updatedAt, next.updatedAt, id);
 		return this.get(id);
 	}
 
