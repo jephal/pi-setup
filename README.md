@@ -45,6 +45,10 @@ This is the single installable Pi package for Jeppe's workflow. Feature boundari
   - Local SQLite-backed user and project memories
   - Explicit save, search, update, and delete tools
   - Optional core-memory injection and bounded archival recall
+- Local notes integration
+  - Agent-first filesystem tools for listing, searching, reading, and writing Markdown notes
+  - Directory-scoped path protection with hidden metadata directories excluded from discovery
+  - No desktop application, HTTP server, or API key required
 - Native Pi subagent workflow
   - `scout`, `planner`, `reviewer`, `worker`, and `datadog-investigator` agents
   - Single, parallel, and chained isolated child sessions
@@ -100,11 +104,54 @@ export DD_MCP_ENDPOINT_PATH='v1/mcp?toolsets=core,error-tracking,rum'
 The extension is intended for read-only investigation. Give the Datadog account
 `mcp_read` and resource read permissions, but not `mcp_write`.
 
+## Local notes integration
+
+The integration is deliberately filesystem-based: notes are Markdown files, so Pi can work with a local notes directory without a desktop application, plugin, or REST API. Configure the directory before starting Pi:
+
+```bash
+export NOTES_PATH="$HOME/notes"
+```
+
+The package registers these agent tools:
+
+- `notes_list` — discover Markdown notes, optionally under a folder.
+- `notes_search` — search note content and filenames.
+- `notes_read` — read one Markdown note.
+- `notes_write` — explicitly create, overwrite, or append to a note.
+- `notes_open_viewer` — open the dependency-free Notes TUI in a Herdr side pane when available.
+- `notes_git` — explicitly run local Git status, diff, or commit against the notes repository.
+
+The visual interface is the dependency-free `notes-tui` application. It provides a hierarchical folder explorer, selected-item highlighting, bounded search, safe Markdown-subset rendering, scrolling, an embedded minimal editor, and explicit save/discard behavior. Use `j`/`k` or arrows to navigate, `Enter` to expand/collapse folders or open notes, `l`/right to expand, `h`/left to collapse or move to the parent, `/` to search, `r` to reload, and `g` to refresh the local Git status. In the editor, `i`/`a`/`o` enter INSERT mode, `Esc` returns to NORMAL mode, `Ctrl-S` saves, `Ctrl-Q` discards, and `u` undoes the last edit. Start it directly in the VM with:
+
+```bash
+notes-tui --notes "$NOTES_PATH"
+```
+
+When Pi runs inside Herdr, use `/notes-open` or ask the agent to use `notes_open_viewer`. The Notes TUI is launched in the managed right-side pane used by `herdr_shell`; if Herdr is unavailable, the command is returned for a normal VM terminal instead.
+
+All paths are relative to the configured notes directory. Traversal is rejected, writes cannot leave the directory, hidden directories are excluded from discovery, and note reads/writes are bounded to 5 MiB. Tool output is bounded to keep large directories from overwhelming the model context. Use `/notes` to show the resolved notes directory in interactive Pi. Git operations are explicit and local-only; no remote is configured.
+
+Every note uses a small YAML frontmatter header so agents and tools can reference it consistently:
+
+```yaml
+---
+title: Human-readable note title
+type: note
+status: active
+created: YYYY-MM-DD
+updated: YYYY-MM-DD
+tags: []
+---
+```
+
+New or updated notes receive missing defaults automatically; existing metadata is preserved and `updated` is refreshed. The implementation supports a conservative YAML subset and does not add a YAML package. The integration is agent-first and does not automatically inject the whole directory into context. Ask the agent to search or list notes when needed, then read only the relevant notes. For writes, the agent must choose `create`, `overwrite`, or `append` explicitly.
+
 ## Development
 
 Stable Pi features are shipped from this repository as one package. Source remains organized by feature: extension entrypoints live under `extensions/`, and shared implementation lives under namespaced `src/` directories. Fovea remains a separately bundled dependency until its WIP branch is ready for consolidation.
 
 The original feature repositories remain available as sources, but new installs should use `@jephal/pi-setup`. The package manifest points directly at the consolidated local entrypoints, bundles the current Fovea package separately, and declares Pi's runtime packages as peer dependencies supplied by the host.
+
 
 Run the local test suite with:
 
