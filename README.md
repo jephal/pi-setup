@@ -116,16 +116,19 @@ The package registers these agent tools:
 - `notes_search` — search note content and filenames.
 - `notes_read` — read one Markdown note.
 - `notes_write` — explicitly create, overwrite, or append to a note.
-- `notes_open_viewer` — open the dependency-free Notes TUI in a Herdr side pane when available; it can include an optional read-only code root.
+- `notes_open_viewer` — open Neovim with the notes directory in a Herdr side pane when available.
+- `notes_open_note` — open a validated note in the running Neovim instance.
+- `notes_refresh` — ask Neovim to detect files changed by Pi or another process.
+- `notes_save` — explicitly save the current Neovim buffer.
 - `notes_git` — explicitly run local Git status, diff, or commit against the notes repository.
 
-The visual interface is the dependency-free `notes-tui` application. It provides a hierarchical folder explorer, selected-item highlighting, bounded search, safe Markdown-subset rendering, scrolling, an embedded minimal editor for notes, and explicit save/discard behavior. Use `j`/`k` or arrows to navigate, `Enter` to expand/collapse folders or open files, `l`/right to expand, `h`/left to collapse or move to the parent, `/` to search, `r` to reload, and `g` to refresh the local Git status. In the editor, `i`/`a`/`o` enter INSERT mode, `Esc` returns to NORMAL mode, `Ctrl-S` saves, `Ctrl-Q` discards, and `u` undoes the last edit. An optional `--code-root PATH` adds a separate read-only code tree; code files can be opened and browsed but cannot enter the Notes editor. Start it directly in the VM with:
+The visual interface is Neovim with a small checked-in configuration at `src/notes/nvim-init.lua`. It uses Neovim’s built-in folder explorer and syntax highlighting, has no plugins, and exposes a `:NotesHelp` command plus discoverable shortcuts. Start it directly in the VM with:
 
 ```bash
-notes-tui --notes "$NOTES_PATH" --code-root "$HOME/falck-dev/two"
+nvim --clean -u src/notes/nvim-init.lua "$NOTES_PATH"
 ```
 
-When Pi runs inside Herdr, use `/notes-open` or ask the agent to use `notes_open_viewer` with an optional `codeRoot`. The Notes TUI is launched in the managed right-side pane used by `herdr_shell`; if Herdr is unavailable, the command is returned for a normal VM terminal instead.
+When Pi runs inside Herdr, use `/notes-open` or ask the agent to use `notes_open_viewer`. Neovim is launched in the managed right-side pane used by `herdr_shell`; if Herdr is unavailable, the command is returned for a normal VM terminal instead. Pi can open validated notes, refresh changed buffers, and explicitly save through a private local Neovim socket. It cannot execute arbitrary Neovim commands.
 
 All paths are relative to the configured notes directory. Traversal is rejected, writes cannot leave the directory, hidden directories are excluded from discovery, and note reads/writes are bounded to 5 MiB. Tool output is bounded to keep large directories from overwhelming the model context. Use `/notes` to show the resolved notes directory in interactive Pi. Git operations are explicit and local-only; no remote is configured.
 

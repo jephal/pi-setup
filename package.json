@@ -2,9 +2,6 @@
   "name": "@jephal/pi-setup",
   "version": "0.1.0",
   "description": "Jeppe's consolidated Pi setup with planning, approvals, memory, Herdr, subagents, and a local notes application",
-  "bin": {
-    "notes-tui": "src/notes/tui.mjs"
-  },
   "publishConfig": {
     "access": "public"
   },
