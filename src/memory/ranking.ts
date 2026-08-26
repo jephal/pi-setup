@@ -4,11 +4,32 @@ function terms(value: string): string[] {
 	return [...new Set(value.toLowerCase().match(/[a-z0-9][a-z0-9_-]*/g) ?? [])];
 }
 
-function recencyScore(record: MemoryRecord, now: number): number {
+export function memoryAgeDays(record: MemoryRecord, now = Date.now()): number {
 	const timestamp = Date.parse(record.lastUsedAt ?? record.updatedAt);
-	if (!Number.isFinite(timestamp)) return 0;
-	const ageDays = Math.max(0, (now - timestamp) / 86_400_000);
-	return Math.exp(-ageDays / 30);
+	if (!Number.isFinite(timestamp)) return Number.POSITIVE_INFINITY;
+	return Math.max(0, (now - timestamp) / 86_400_000);
+}
+
+/**
+ * Important memories decay more slowly, while low-importance memories need
+ * recent confirmation to remain eligible for automatic recall. This keeps
+ * durable preferences available without allowing an unbounded archive to stay
+ * in context forever.
+ */
+export function memoryFreshnessWindowDays(record: MemoryRecord, baseDays: number): number {
+	const importance = Math.max(0, Math.min(1, record.importance));
+	return Math.max(0, baseDays) * (0.5 + importance * 1.5);
+}
+
+export function isMemoryStale(record: MemoryRecord, maxAgeDays: number, now = Date.now()): boolean {
+	return memoryAgeDays(record, now) > memoryFreshnessWindowDays(record, maxAgeDays);
+}
+
+function recencyScore(record: MemoryRecord, now: number): number {
+	const ageDays = memoryAgeDays(record, now);
+	if (!Number.isFinite(ageDays)) return 0;
+	const halfLifeDays = memoryFreshnessWindowDays(record, 30);
+	return Math.exp(-ageDays / Math.max(1, halfLifeDays));
 }
 
 function scoreRecord(record: MemoryRecord, queryTerms: string[], query: string, now: number): number {
@@ -28,13 +49,13 @@ function scoreRecord(record: MemoryRecord, queryTerms: string[], query: string, 
 	const retrievals = Math.min(1, Math.log1p(record.retrievalCount) / Math.log(21));
 
 	return (
-		overlap * 0.55 +
-		tagMatch * 0.15 +
+		overlap * 0.52 +
+		tagMatch * 0.14 +
 		phraseMatch * 0.1 +
-		importance * 0.1 +
-		confirmations * 0.07 +
+		importance * 0.12 +
+		confirmations * 0.06 +
 		retrievals * 0.01 +
-		recencyScore(record, now) * 0.02
+		recencyScore(record, now) * 0.05
 	);
 }
 
