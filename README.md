@@ -6,9 +6,11 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
 
 ## Included features
 
-- Fovea code graph (bundled separately while WIP)
+- Fovea code graph (bundled dependency)
   - Agent-only cross-language code graph and token-budgeted repository navigation
-  - Explicit sketch/focus/dwell/impact tools; no graph UI
+  - Private per-worktree SQLite snapshots with automatic first-use initialization
+  - Clean-worktree `focus`, `dwell`, and `impact` queries load bounded graph neighborhoods
+  - First bootstrap, `sketch`, and relevant dirty-worktree changes use a fresh full graph
   - Safe defaults: no proactive turn sync, no grep interception, no credential-file indexing
   - Uses `ast-grep` for extraction; install it once with `npm install --global @ast-grep/cli@0.45.2`
 - Ask Questions
@@ -55,7 +57,7 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
 From GitHub (recommended):
 
 ```bash
-pi install git:github.com/jephal/pi-setup@main
+pi install git:github.com/jephal/pi-setup@docs/github-only-install
 ```
 
 An npm package name is reserved for a future release, but npm publication is not required for this setup.
@@ -98,9 +100,11 @@ The extension is intended for read-only investigation. Give the Datadog account
 
 ## Development
 
-Stable Pi features are shipped from this repository as one package. Source remains organized by feature: extension entrypoints live under `extensions/`, and shared implementation lives under namespaced `src/` directories. Fovea remains a separately bundled dependency until its WIP branch is ready for consolidation.
+Stable Pi features are shipped from this repository as one package. Source remains organized by feature: extension entrypoints live under `extensions/`, and shared implementation lives under namespaced `src/` directories. Fovea remains a separately versioned bundled dependency so its graph engine can be updated independently.
 
 The original feature repositories remain available as sources, but new installs should use `@jephal/pi-setup`. The package manifest points directly at the consolidated local entrypoints, bundles the current Fovea package separately, and declares Pi's runtime packages as peer dependencies supplied by the host.
+
+Fovea requires no per-worktree initialization command. On the first graph request it creates a private SQLite cache under the user cache directory; subsequent clean-worktree focus, dwell, and impact calls use bounded SQLite reads. Stale worktree caches are reclaimed conservatively, with `/fovea cache status`, `/fovea cache dry-run`, and `/fovea cache purge` available for diagnostics. Obsidian/notes integrations remain separate from the code graph.
 
 Run the local test suite with:
 

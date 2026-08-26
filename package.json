@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "pi-fovea": "git+https://github.com/jephal/pi-fovea.git#v0.18.5-agent-safe.1"
+    "pi-fovea": "git+https://github.com/jephal/pi-fovea.git#v0.18.5-agent-safe.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
