@@ -65,6 +65,12 @@ interface HerdrContext {
   parentTabId?: string;
 }
 
+interface HerdrOpenCommandRequest {
+  command: string;
+  cwd?: string;
+  respond: (result: { ok: boolean; error?: string }) => void;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -382,6 +388,40 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
     bindingsPromise ??= readPersistedState();
     return bindingsPromise;
   };
+
+  let currentContext: ExtensionContext | undefined;
+  pi.on("session_start", (_event, ctx) => {
+    currentContext = ctx;
+  });
+  pi.on("session_shutdown", () => {
+    currentContext = undefined;
+  });
+
+  // Other extensions can request a command in the same managed pane without
+  // duplicating Herdr pane state or invoking a shell from the parent process.
+  pi.events.on("herdr:open-command", (value) => {
+    const request = value as Partial<HerdrOpenCommandRequest>;
+    if (typeof request.command !== "string" || typeof request.respond !== "function") return;
+    const context = currentContext;
+    if (!context) {
+      request.respond({ ok: false, error: "No active Pi session is available for Herdr." });
+      return;
+    }
+
+    const currentOperation = operation.then(async () => {
+      const bindings = await getBindings();
+      return executeAction(client, bindings, {
+        action: "open",
+        command: request.command!,
+        cwd: request.cwd,
+      }, context);
+    });
+    operation = currentOperation.then(() => undefined, () => undefined);
+    void currentOperation.then(
+      () => request.respond!({ ok: true }),
+      (error: unknown) => request.respond!({ ok: false, error: formatHerdrError(error) }),
+    );
+  });
 
   pi.registerTool({
     name: "herdr_shell",

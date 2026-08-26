@@ -1,7 +1,10 @@
 {
   "name": "@jephal/pi-setup",
   "version": "0.1.0",
-  "description": "Jeppe's consolidated Pi setup with planning, approvals, memory, Herdr, and subagents",
+  "description": "Jeppe's consolidated Pi setup with planning, approvals, memory, Herdr, subagents, and a local notes application",
+  "bin": {
+    "notes-tui": "src/notes/tui.mjs"
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -47,6 +50,7 @@
       "extensions/plan-mode.ts",
       "extensions/approval-modes.ts",
       "extensions/memory.ts",
+      "extensions/notes.ts",
       "node_modules/pi-fovea/src/index.ts",
       "extensions/datadog-mcp.ts",
       "extensions/herdr-shell.ts"
