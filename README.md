@@ -45,6 +45,10 @@ This is the single installable Pi package for Jeppe's workflow. Feature boundari
   - Local SQLite-backed user and project memories
   - Explicit save, search, update, and delete tools
   - Optional core-memory injection and bounded archival recall
+- Agent-first scheduled tasks
+  - The agent creates, lists, cancels, and runs recurring or one-shot prompts when asked
+  - Local SQLite persistence scoped by Pi session and working directory
+  - IANA timezone-aware five-field cron, coalesced missed fires, and busy-turn follow-ups
 - Native Pi subagent workflow
   - `scout`, `planner`, `reviewer`, `worker`, and `datadog-investigator` agents
   - Single, parallel, and chained isolated child sessions

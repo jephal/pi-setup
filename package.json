@@ -49,7 +49,8 @@
       "extensions/memory.ts",
       "node_modules/pi-fovea/src/index.ts",
       "extensions/datadog-mcp.ts",
-      "extensions/herdr-shell.ts"
+      "extensions/herdr-shell.ts",
+      "extensions/scheduled-tasks.ts"
     ],
     "prompts": [
       "prompts/*.md"
