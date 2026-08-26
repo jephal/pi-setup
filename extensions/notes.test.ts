@@ -21,7 +21,7 @@ test("registers the agent-first Notes tool surface", () => {
 	};
 
 	notesExtension(fakePi as unknown as ExtensionAPI);
-	assert.deepEqual(tools, ["notes_list", "notes_search", "notes_read", "notes_write", "notes_open_viewer", "notes_git"]);
+	assert.deepEqual(tools, ["notes_list", "notes_search", "notes_read", "notes_write", "notes_open_viewer", "notes_open_note", "notes_refresh", "notes_save", "notes_git"]);
 	assert.deepEqual(commands, ["notes", "notes-open"]);
 });
 
@@ -57,8 +57,9 @@ test("returns a direct VM command when Herdr is unavailable", async () => {
 		assert.ok(tool);
 		const result = await tool.execute("test", { readOnly: true });
 		assert.equal(result.details.opened, false);
-		assert.match(result.content[0].text, /src\/notes\/tui\.mjs/);
-		assert.match(result.content[0].text, /--notes/);
+		assert.match(result.content[0].text, /src\/notes\/nvim-init\.lua/);
+		assert.match(result.content[0].text, /--listen/);
+		assert.match(result.content[0].text, /--clean/);
 	} finally {
 		if (previousVault === undefined) delete process.env.NOTES_PATH;
 		else process.env.NOTES_PATH = previousVault;
