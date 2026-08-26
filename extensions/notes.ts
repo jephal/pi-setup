@@ -1,6 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	NotesVault,
@@ -24,6 +25,7 @@ const searchParameters = Type.Object({
 
 const openViewerParameters = Type.Object({
 	readOnly: Type.Optional(Type.Boolean({ description: "Open the Notes viewer in read-only mode" })),
+	codeRoot: Type.Optional(Type.String({ description: "Optional code directory to browse read-only; relative to the current project or absolute" })),
 });
 
 const gitParameters = Type.Object({
@@ -57,14 +59,15 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function viewerCommand(root: string, readOnly: boolean): string {
+function viewerCommand(root: string, readOnly: boolean, codeRoot?: string): string {
 	const viewerPath = fileURLToPath(new URL("../src/notes/tui.mjs", import.meta.url));
-	return [shellQuote(process.execPath), shellQuote(viewerPath), "--notes", shellQuote(root), readOnly ? "--read-only" : ""].filter(Boolean).join(" ");
+	return [shellQuote(process.execPath), shellQuote(viewerPath), "--notes", shellQuote(root), ...(codeRoot ? ["--code-root", shellQuote(codeRoot)] : []), readOnly ? "--read-only" : ""].filter(Boolean).join(" ");
 }
 
-async function openViewerInHerdr(pi: ExtensionAPI, readOnly: boolean) {
+async function openViewerInHerdr(pi: ExtensionAPI, readOnly: boolean, requestedCodeRoot?: string, cwd?: string) {
 	const root = await configuredNotes().getRoot();
-	const command = viewerCommand(root, readOnly);
+	const codeRoot = requestedCodeRoot ? resolve(cwd ?? process.cwd(), requestedCodeRoot) : undefined;
+	const command = viewerCommand(root, readOnly, codeRoot);
 	const herdrToolAvailable = typeof pi.getAllTools === "function" && pi.getAllTools().some((tool) => tool.name === "herdr_shell");
 	if (process.env.HERDR_ENV !== "1" || !herdrToolAvailable) {
 		return textResult(`Herdr is unavailable in this Pi session. Run this in a VM terminal instead:\n${command}`, {
@@ -216,8 +219,8 @@ export default function notesExtension(pi: ExtensionAPI): void {
 			"notes_open_viewer uses Herdr when Pi is running inside Herdr and never exposes the notes directory over a network.",
 		],
 		parameters: openViewerParameters,
-		async execute(_toolCallId, params) {
-			return openViewerInHerdr(pi, params.readOnly === true);
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			return openViewerInHerdr(pi, params.readOnly === true, params.codeRoot, ctx?.cwd);
 		},
 	});
 

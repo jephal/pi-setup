@@ -5,31 +5,38 @@ import { promises as fs } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const MAX_NOTE_BYTES = 5 * 1024 * 1024;
+const MAX_CODE_BYTES = 2 * 1024 * 1024;
 const MAX_NOTES = 5_000;
 const MAX_SEARCH_RESULTS = 200;
 const MAX_UNDO_STEPS = 100;
 const CONTROL_SEQUENCE = /\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[()][0-2A-Za-z])/g;
 const SELECTED_STYLE = "\x1b[7m";
 const RESET_STYLE = "\x1b[0m";
+const IGNORED_CODE_DIRECTORIES = new Set([".git", "node_modules", ".next", ".turbo", "dist", "build", "coverage", "target"]);
 
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
-	console.log("Usage: notes-tui --notes PATH [--note NOTE_PATH] [--read-only]");
+	console.log("Usage: notes-tui --notes PATH [--code-root PATH] [--note NOTE_PATH] [--read-only]");
 	process.exit(0);
 }
 if (!args.notes) fail("--notes PATH is required.");
 if (!process.stdin.isTTY || !process.stdout.isTTY) fail("notes-tui requires an interactive terminal.");
 
 const root = await getNotesRoot(args.notes);
-let explorer = await listExplorer(root);
-let notes = flattenNotes(explorer);
-let visibleNotes = notes;
+const codeRoot = args.codeRoot ? await getNotesRoot(args.codeRoot) : undefined;
+let explorer = await listExplorer(root, "notes");
+let codeExplorer = codeRoot ? await listExplorer(codeRoot, "code") : [];
+let explorerRoots = makeExplorerRoots(explorer, codeExplorer);
+let notes = flattenFiles(explorer);
+let allFiles = [...notes, ...flattenFiles(codeExplorer)];
+let visibleNotes = allFiles;
 let searchActive = false;
 let selected = 0;
 let view = "list";
 let inputMode = false;
 let inputQuery = "";
 let notePath;
+let activeKind = "notes";
 let noteContent = "";
 let gitSummary;
 let editorLines = [];
@@ -52,6 +59,7 @@ function parseArgs(values) {
 		if (value === "--help" || value === "-h") parsed.help = true;
 		else if (value === "--read-only") parsed.readOnly = true;
 		else if (value === "--notes" || value === "-v") parsed.notes = values[++index];
+		else if (value === "--code-root" || value === "-c") parsed.codeRoot = values[++index];
 		else if (value === "--note" || value === "-n") parsed.note = values[++index];
 		else fail(`Unknown option: ${value}`);
 	}
@@ -89,7 +97,7 @@ async function getNotesRoot(notesPath) {
 	return rootPath;
 }
 
-async function listExplorer(rootPath) {
+async function listExplorer(rootPath, kind) {
 	const visited = { count: 0 };
 	async function visit(directory, parentPath = "") {
 		const folders = [];
@@ -101,11 +109,12 @@ async function listExplorer(rootPath) {
 			const child = join(directory, entry.name);
 			const childPath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
 			if (entry.isDirectory()) {
-				folders.push({ type: "folder", name: entry.name, path: childPath, children: await visit(child, childPath), expanded: false });
-			} else if (entry.isFile() && entry.name.toLocaleLowerCase().endsWith(".md")) {
+				if (kind === "code" && IGNORED_CODE_DIRECTORIES.has(entry.name)) continue;
+				folders.push({ type: "folder", kind, name: entry.name, path: childPath, children: await visit(child, childPath), expanded: false });
+			} else if (entry.isFile() && await isVisibleFile(child, entry.name, kind)) {
 				const realPath = await fs.realpath(child);
 				assertInside(rootPath, realPath);
-				files.push({ type: "note", name: entry.name, path: childPath, absolute: realPath });
+				files.push({ type: "file", kind, name: entry.name, path: childPath, absolute: realPath });
 				visited.count++;
 			}
 		}
@@ -114,14 +123,32 @@ async function listExplorer(rootPath) {
 	return visit(rootPath);
 }
 
-function flattenNotes(items) {
-	return items.flatMap((item) => item.type === "folder" ? flattenNotes(item.children) : [item]);
+async function isVisibleFile(filePath, name, kind) {
+	if (kind === "notes") return name.toLocaleLowerCase().endsWith(".md");
+	try {
+		const fileStat = await fs.stat(filePath);
+		if (fileStat.size > MAX_CODE_BYTES) return false;
+		return !(await fs.readFile(filePath, "utf8")).includes("\0");
+	} catch {
+		return false;
+	}
+}
+
+function flattenFiles(items) {
+	return items.flatMap((item) => item.type === "folder" || item.type === "section" ? flattenFiles(item.children) : [item]);
+}
+
+function makeExplorerRoots(noteItems, codeItems) {
+	return [
+		{ type: "section", kind: "notes", name: "Notes", path: "__notes__", children: noteItems, expanded: true },
+		...(codeRoot ? [{ type: "section", kind: "code", name: "Code (read-only)", path: "__code__", children: codeItems, expanded: false }] : []),
+	];
 }
 
 function explorerRows(items, parentPath = "", depth = 0, rows = []) {
 	for (const item of items) {
 		rows.push({ item, parentPath, depth });
-		if (item.type === "folder" && item.expanded) explorerRows(item.children, item.path, depth + 1, rows);
+		if ((item.type === "folder" || item.type === "section") && item.expanded) explorerRows(item.children, item.path, depth + 1, rows);
 	}
 	return rows;
 }
@@ -141,11 +168,12 @@ function readGitSummary(rootPath) {
 	}
 }
 
-async function readNote(note) {
-	const linkStat = await fs.lstat(note.absolute);
-	if (linkStat.isSymbolicLink() || !linkStat.isFile()) throw new Error(`Note is not a regular file: ${note.path}`);
-	if (linkStat.size > MAX_NOTE_BYTES) throw new Error(`Note is larger than ${MAX_NOTE_BYTES} bytes: ${note.path}`);
-	return fs.readFile(note.absolute, "utf8");
+async function readFileEntry(file) {
+	const linkStat = await fs.lstat(file.absolute);
+	if (linkStat.isSymbolicLink() || !linkStat.isFile()) throw new Error(`File is not a regular file: ${file.path}`);
+	const limit = file.kind === "code" ? MAX_CODE_BYTES : MAX_NOTE_BYTES;
+	if (linkStat.size > limit) throw new Error(`File is larger than ${limit} bytes: ${file.path}`);
+	return fs.readFile(file.absolute, "utf8");
 }
 
 function wrapLine(line, width) {
@@ -194,16 +222,16 @@ function inlineMarkdown(value) {
 
 async function searchNotes(query) {
 	const needle = query.trim().toLocaleLowerCase();
-	if (!needle) return notes;
+	if (!needle) return allFiles;
 	const matches = [];
-	for (const note of notes) {
+	for (const note of allFiles) {
 		if (matches.length >= MAX_SEARCH_RESULTS) break;
 		if (note.path.toLocaleLowerCase().includes(needle)) {
 			matches.push(note);
 			continue;
 		}
 		try {
-			if ((await readNote(note)).toLocaleLowerCase().includes(needle)) matches.push(note);
+			if ((await readFileEntry(note)).toLocaleLowerCase().includes(needle)) matches.push(note);
 		} catch {
 			// A note can disappear while the directory is being edited; skip it.
 		}
@@ -212,7 +240,7 @@ async function searchNotes(query) {
 }
 
 function currentItems() {
-	return searchActive ? visibleNotes : explorerRows(explorer);
+	return searchActive ? visibleNotes : explorerRows(explorerRoots);
 }
 
 function selectedLine(text, isSelected) {
@@ -222,13 +250,21 @@ function selectedLine(text, isSelected) {
 function explorerLine(row, index) {
 	const item = row.item;
 	const prefix = "  ".repeat(row.depth);
-	const marker = item.type === "folder" ? (item.expanded ? "▾" : "▸") : " ";
-	const suffix = item.type === "folder" ? "/" : "";
+	const isContainer = item.type === "folder" || item.type === "section";
+	const marker = isContainer ? (item.expanded ? "▾" : "▸") : " ";
+	const suffix = isContainer ? "/" : "";
 	return selectedLine(`${index === selected ? ">" : " "} ${prefix}${marker} ${sanitizeDisplay(item.name)}${suffix}`, index === selected);
 }
 
 function searchLine(note, index) {
-	return selectedLine(`${index === selected ? ">" : " "} ${sanitizeDisplay(note.path)}`, index === selected);
+	const kind = note.kind === "code" ? "[code] " : "";
+	return selectedLine(`${index === selected ? ">" : " "} ${kind}${sanitizeDisplay(note.path)}`, index === selected);
+}
+
+function renderCode(content, width) {
+	return sanitizeTerminal(content).replaceAll("\r\n", "\n").split("\n").flatMap((line, index) =>
+		wrapLine(`${String(index + 1).padStart(5, " ")} │ ${line}`, width),
+	);
 }
 
 function bodyHeight() {
@@ -238,14 +274,14 @@ function bodyHeight() {
 function draw() {
 	const width = Math.max(20, process.stdout.columns || 80);
 	const height = bodyHeight();
-	const title = view === "note" ? `NOTE  ${notePath}` : `NOTES  ${relative(process.cwd(), root) || "."}`;
+	const title = view === "note" ? `${activeKind === "code" ? "CODE" : "NOTE"}  ${notePath}` : `NOTES  ${relative(process.cwd(), root) || "."}`;
 	const header = `\x1b[1;36m${sanitizeDisplay(`${title} · ${gitSummary}`).slice(0, width)}\x1b[0m`;
 	let body;
 	if (inputMode) {
 		body = visibleNotes.map((note, index) => searchLine(note, index));
 		body.unshift(`Search: ${sanitizeDisplay(inputQuery)}_`);
 	} else if (view === "note") {
-		body = renderMarkdown(noteContent, width);
+		body = activeKind === "code" ? renderCode(noteContent, width) : renderMarkdown(noteContent, width);
 	} else if (view === "edit") {
 		const availableWidth = Math.max(10, width - 8);
 		body = editorLines.map((line, index) => {
@@ -300,14 +336,17 @@ function quit(code = 0) {
 
 async function openSelected() {
 	const selectedItem = currentItems()[selected];
-	const note = searchActive ? selectedItem : selectedItem?.item;
-	if (!note || note.type !== "note") return;
+	const file = searchActive ? selectedItem : selectedItem?.item;
+	if (!file || file.type !== "file") return;
 	try {
-		notePath = note.path;
-		noteContent = await readNote(note);
+		notePath = file.path;
+		activeKind = file.kind;
+		noteContent = await readFileEntry(file);
 		view = "note";
 		scroll = 0;
-		status = "Esc: notes · j/k or arrows: scroll · e: edit · q: quit";
+		status = file.kind === "code"
+			? "Esc: explorer · j/k or arrows: scroll · read-only · q: quit"
+			: "Esc: notes · j/k or arrows: scroll · e: edit · q: quit";
 	} catch (error) {
 		status = error instanceof Error ? error.message : String(error);
 	}
@@ -319,9 +358,12 @@ async function enterEditor() {
 		return;
 	}
 	const note = notes.find((candidate) => candidate.path === notePath);
-	if (!note) return;
+	if (!note || activeKind !== "notes") {
+		status = "Code files are read-only.";
+		return;
+	}
 	try {
-		noteContent = await readNote(note);
+		noteContent = await readFileEntry(note);
 		editorLines = noteContent.split("\n");
 		if (editorLines.length === 0) editorLines = [""];
 		editorRow = 0;
@@ -502,12 +544,12 @@ async function applySearch() {
 function collapseOrMoveToParent() {
 	const row = currentItems()[selected];
 	if (!row) return;
-	if (row.item.type === "folder" && row.item.expanded) {
+	if ((row.item.type === "folder" || row.item.type === "section") && row.item.expanded) {
 		row.item.expanded = false;
 		return;
 	}
 	if (!row.parentPath) return;
-	const parentIndex = currentItems().findIndex((candidate) => candidate.item.type === "folder" && candidate.item.path === row.parentPath);
+	const parentIndex = currentItems().findIndex((candidate) => (candidate.item.type === "folder" || candidate.item.type === "section") && candidate.item.path === row.parentPath);
 	if (parentIndex >= 0) selected = parentIndex;
 }
 
@@ -568,13 +610,13 @@ async function handleKey(key) {
 		if (searchActive) await openSelected();
 		else {
 			const row = currentItems()[selected];
-			if (row?.item.type === "folder") row.item.expanded = !row.item.expanded;
+			if (row?.item.type === "folder" || row?.item.type === "section") row.item.expanded = !row.item.expanded;
 			else await openSelected();
 		}
 	} else if (key === "l" || key === "right") {
 		if (!searchActive) {
 			const row = currentItems()[selected];
-			if (row?.item.type === "folder") row.item.expanded = true;
+			if (row?.item.type === "folder" || row?.item.type === "section") row.item.expanded = true;
 		}
 	} else if (key === "h" || key === "left") {
 		if (!searchActive) collapseOrMoveToParent();
@@ -583,10 +625,13 @@ async function handleKey(key) {
 		gitSummary = readGitSummary(root);
 		status = gitSummary;
 	} else if (key === "r") {
-		explorer = await listExplorer(root);
-		notes = flattenNotes(explorer);
+		explorer = await listExplorer(root, "notes");
+		codeExplorer = codeRoot ? await listExplorer(codeRoot, "code") : [];
+		explorerRoots = makeExplorerRoots(explorer, codeExplorer);
+		notes = flattenFiles(explorer);
+		allFiles = [...notes, ...flattenFiles(codeExplorer)];
 		gitSummary = readGitSummary(root);
-		visibleNotes = notes;
+		visibleNotes = allFiles;
 		searchActive = false;
 		selected = 0;
 		status = `Reloaded ${notes.length} note(s).`;
@@ -618,7 +663,8 @@ if (args.note) {
 	const note = notes.find((candidate) => candidate.path === requested);
 	if (!note) fail(`Note was not found in the notes directory: ${requested}`);
 	notePath = note.path;
-	noteContent = await readNote(note);
+	activeKind = note.kind;
+	noteContent = await readFileEntry(note);
 	view = "note";
 	status = "Esc: notes · j/k or arrows: scroll · e: edit · q: quit";
 }

@@ -2,13 +2,15 @@
 
 Jeppe's personal [pi](https://pi.dev) setup bundle.
 
-This is the single installable Pi package for Jeppe's workflow. Feature boundaries remain modular inside the repository, but runtime users install one package: `@jephal/pi-setup`.
+This is the single GitHub-installable Pi package for Jeppe's workflow. Feature boundaries remain modular inside the repository, but runtime users install one package: `@jephal/pi-setup`.
 
 ## Included features
 
-- Fovea code graph (bundled separately while WIP)
+- Fovea code graph (bundled dependency)
   - Agent-only cross-language code graph and token-budgeted repository navigation
-  - Explicit sketch/focus/dwell/impact tools; no graph UI
+  - Private per-worktree SQLite snapshots with automatic first-use initialization
+  - Clean-worktree `focus`, `dwell`, and `impact` queries load bounded graph neighborhoods
+  - First bootstrap, `sketch`, and relevant dirty-worktree changes use a fresh full graph
   - Safe defaults: no proactive turn sync, no grep interception, no credential-file indexing
   - Uses `ast-grep` for extraction; install it once with `npm install --global @ast-grep/cli@0.45.2`
 - Ask Questions
@@ -56,17 +58,13 @@ This is the single installable Pi package for Jeppe's workflow. Feature boundari
 
 ## Install the complete setup
 
-From npm (recommended):
+From GitHub (recommended):
 
 ```bash
-pi install npm:@jephal/pi-setup
+pi install git:github.com/jephal/pi-setup@docs/github-only-install
 ```
 
-From GitHub while developing:
-
-```bash
-pi install git:github.com/jephal/pi-setup@main
-```
+An npm package name is reserved for a future release, but npm publication is not required for this setup.
 
 Then reload Pi:
 
@@ -118,16 +116,16 @@ The package registers these agent tools:
 - `notes_search` — search note content and filenames.
 - `notes_read` — read one Markdown note.
 - `notes_write` — explicitly create, overwrite, or append to a note.
-- `notes_open_viewer` — open the dependency-free Notes TUI in a Herdr side pane when available.
+- `notes_open_viewer` — open the dependency-free Notes TUI in a Herdr side pane when available; it can include an optional read-only code root.
 - `notes_git` — explicitly run local Git status, diff, or commit against the notes repository.
 
-The visual interface is the dependency-free `notes-tui` application. It provides a hierarchical folder explorer, selected-item highlighting, bounded search, safe Markdown-subset rendering, scrolling, an embedded minimal editor, and explicit save/discard behavior. Use `j`/`k` or arrows to navigate, `Enter` to expand/collapse folders or open notes, `l`/right to expand, `h`/left to collapse or move to the parent, `/` to search, `r` to reload, and `g` to refresh the local Git status. In the editor, `i`/`a`/`o` enter INSERT mode, `Esc` returns to NORMAL mode, `Ctrl-S` saves, `Ctrl-Q` discards, and `u` undoes the last edit. Start it directly in the VM with:
+The visual interface is the dependency-free `notes-tui` application. It provides a hierarchical folder explorer, selected-item highlighting, bounded search, safe Markdown-subset rendering, scrolling, an embedded minimal editor for notes, and explicit save/discard behavior. Use `j`/`k` or arrows to navigate, `Enter` to expand/collapse folders or open files, `l`/right to expand, `h`/left to collapse or move to the parent, `/` to search, `r` to reload, and `g` to refresh the local Git status. In the editor, `i`/`a`/`o` enter INSERT mode, `Esc` returns to NORMAL mode, `Ctrl-S` saves, `Ctrl-Q` discards, and `u` undoes the last edit. An optional `--code-root PATH` adds a separate read-only code tree; code files can be opened and browsed but cannot enter the Notes editor. Start it directly in the VM with:
 
 ```bash
-notes-tui --notes "$NOTES_PATH"
+notes-tui --notes "$NOTES_PATH" --code-root "$HOME/falck-dev/two"
 ```
 
-When Pi runs inside Herdr, use `/notes-open` or ask the agent to use `notes_open_viewer`. The Notes TUI is launched in the managed right-side pane used by `herdr_shell`; if Herdr is unavailable, the command is returned for a normal VM terminal instead.
+When Pi runs inside Herdr, use `/notes-open` or ask the agent to use `notes_open_viewer` with an optional `codeRoot`. The Notes TUI is launched in the managed right-side pane used by `herdr_shell`; if Herdr is unavailable, the command is returned for a normal VM terminal instead.
 
 All paths are relative to the configured notes directory. Traversal is rejected, writes cannot leave the directory, hidden directories are excluded from discovery, and note reads/writes are bounded to 5 MiB. Tool output is bounded to keep large directories from overwhelming the model context. Use `/notes` to show the resolved notes directory in interactive Pi. Git operations are explicit and local-only; no remote is configured.
 
@@ -148,10 +146,11 @@ New or updated notes receive missing defaults automatically; existing metadata i
 
 ## Development
 
-Stable Pi features are shipped from this repository as one package. Source remains organized by feature: extension entrypoints live under `extensions/`, and shared implementation lives under namespaced `src/` directories. Fovea remains a separately bundled dependency until its WIP branch is ready for consolidation.
+Stable Pi features are shipped from this repository as one package. Source remains organized by feature: extension entrypoints live under `extensions/`, and shared implementation lives under namespaced `src/` directories. Fovea remains a separately versioned bundled dependency so its graph engine can be updated independently.
 
 The original feature repositories remain available as sources, but new installs should use `@jephal/pi-setup`. The package manifest points directly at the consolidated local entrypoints, bundles the current Fovea package separately, and declares Pi's runtime packages as peer dependencies supplied by the host.
 
+Fovea requires no per-worktree initialization command. On the first graph request it creates a private SQLite cache under the user cache directory; subsequent clean-worktree focus, dwell, and impact calls use bounded SQLite reads. Stale worktree caches are reclaimed conservatively, with `/fovea cache status`, `/fovea cache dry-run`, and `/fovea cache purge` available for diagnostics. Obsidian/notes integrations remain separate from the code graph.
 
 Run the local test suite with:
 
