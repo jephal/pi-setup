@@ -51,6 +51,10 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Agent-first filesystem tools for listing, searching, reading, and writing Markdown notes
   - Directory-scoped path protection with hidden metadata directories excluded from discovery
   - No desktop application, HTTP server, or API key required
+- Agent-first scheduled tasks
+  - The agent creates, lists, cancels, and runs recurring or one-shot prompts when asked
+  - Local SQLite persistence scoped by Pi session and working directory
+  - IANA timezone-aware five-field cron, coalesced missed fires, and busy-turn follow-ups
 - Native Pi subagent workflow
   - `scout`, `planner`, `reviewer`, `worker`, and `datadog-investigator` agents
   - Single, parallel, and chained isolated child sessions

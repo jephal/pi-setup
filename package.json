@@ -1,6 +1,6 @@
 {
   "name": "@jephal/pi-setup",
-  "version": "0.1.0",
+  "version": "0.0.7",
   "description": "Jeppe's consolidated Pi setup with planning, approvals, memory, Herdr, subagents, and a local notes application",
   "publishConfig": {
     "access": "public"
@@ -50,7 +50,8 @@
       "extensions/notes.ts",
       "node_modules/pi-fovea/src/index.ts",
       "extensions/datadog-mcp.ts",
-      "extensions/herdr-shell.ts"
+      "extensions/herdr-shell.ts",
+      "extensions/scheduled-tasks.ts"
     ],
     "prompts": [
       "prompts/*.md"
