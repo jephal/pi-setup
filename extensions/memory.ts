@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { MemoryStore } from "../src/memory/db.js";
 import type { MemoryCategory, MemoryScope, MemorySearchResult } from "../src/memory/types.js";
@@ -84,120 +84,93 @@ function formatResults(results: MemorySearchResult[]): string {
 	return results.length ? results.map((record) => formatMemory(record)).join("\n\n") : "No memories found.";
 }
 
-const memorySaveSchema = Type.Object({
-	content: Type.String({ description: "The concise fact, preference, decision, or workflow to remember" }),
-	scope: Type.Optional(Type.String({ description: "Memory scope: user or project (default: user)" })),
+const memoryToolSchema = Type.Object({
+	action: Type.Union([
+		Type.Literal("search"),
+		Type.Literal("list"),
+		Type.Literal("save"),
+		Type.Literal("update"),
+		Type.Literal("delete"),
+	], { description: "Memory operation to perform" }),
+	query: Type.Optional(Type.String({ description: "Search terms for the search action" })),
+	id: Type.Optional(Type.String({ description: "Memory ID for update or delete" })),
+	content: Type.Optional(Type.String({ description: "Concise stable memory content for save or update" })),
+	scope: Type.Optional(Type.String({ description: "Memory scope: user or project" })),
 	category: Type.Optional(Type.String({ description: "Memory category: preference, fact, decision, or workflow" })),
 	tags: Type.Optional(Type.Array(Type.String())),
 	importance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
-	alwaysInject: Type.Optional(Type.Boolean({ description: "Inject this stable user memory on every agent turn" })),
-});
-
-const memorySearchSchema = Type.Object({
-	query: Type.String({ description: "Terms to search for" }),
-	scope: Type.Optional(Type.String({ description: "Optional scope filter: user or project" })),
+	alwaysInject: Type.Optional(Type.Boolean({ description: "Inject this explicitly confirmed user memory on every agent turn" })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
 });
-
-const memoryListSchema = Type.Object({
-	scope: Type.Optional(Type.String({ description: "Optional scope filter: user or project" })),
-	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
-});
-
-const memoryUpdateSchema = Type.Object({
-	id: Type.String(),
-	content: Type.Optional(Type.String()),
-	scope: Type.Optional(Type.String()),
-	category: Type.Optional(Type.String()),
-	tags: Type.Optional(Type.Array(Type.String())),
-	importance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
-	alwaysInject: Type.Optional(Type.Boolean({ description: "Whether this stable user memory is injected on every agent turn" })),
-});
-
-const memoryDeleteSchema = Type.Object({ id: Type.String() });
 
 function registerMemoryTools(pi: ExtensionAPI): void {
 	pi.registerTool({
-		name: "memory_save",
-		label: "Memory Save",
-		description: "Save one concise, explicit user or project memory to the local SQLite store. Do not save credentials, tokens, private keys, or raw transcripts.",
-		promptSnippet: "Save an explicit fact, preference, decision, or workflow to local memory",
+		name: "memory",
+		label: "Memory",
+		description: "Manage durable memories with one tool. During normal work, notice repeated user preferences, decisions, facts, and workflows and save useful stable patterns proactively. Search before saving, update related memories instead of duplicating them, and never save transient details, uncertainty, credentials, tokens, private keys, or raw transcripts.",
+		promptSnippet: "Search, save, update, list, or delete durable memories",
 		promptGuidelines: [
-			"Use memory_save for concise stable preferences, decisions, facts, or workflows the user explicitly asks to remember or clearly states and confirms.",
-			"Be proactive about saving a stable preference or confirmed workflow when it will help future sessions, but do not save transient task details or uncertain assumptions.",
-			"Do not use memory_save for credentials, tokens, private keys, raw auth files, or unrestricted conversation transcripts.",
+			"Use memory action search before saving or updating when a related memory may already exist.",
+			"Use memory action save when the current conversation reveals a stable preference, decision, fact, or workflow, even if the user did not say remember.",
+			"Infer patterns conservatively: prefer repeated behavior or clear durable signals, not one-off requests or temporary task context.",
+			"Use memory action update to consolidate an existing memory. Use alwaysInject only for explicitly confirmed core memories, not inferred patterns.",
+			"Never save credentials, tokens, private keys, raw auth files, sensitive values, or unrestricted conversation transcripts.",
 		],
-		parameters: memorySaveSchema,
+		parameters: memoryToolSchema,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const record = withStore((store) => store.save({
-				content: params.content,
-				scope: scope(params.scope),
-				category: category(params.category),
-				tags: params.tags ?? [],
-				importance: params.importance ?? 0.5,
-				alwaysInject: params.alwaysInject ?? false,
-				source: { sessionId: ctx.sessionManager.getSessionId() },
-			}));
-			return { content: [{ type: "text", text: `Saved memory ${record.id}.` }], details: { record } };
-		},
-	});
-
-	pi.registerTool({
-		name: "memory_search",
-		label: "Memory Search",
-		description: "Search local memory with bounded relevance ranking. Explicit searches may include older memories; automatic recall applies importance-weighted freshness filtering.",
-		promptSnippet: "Search relevant local memories",
-		parameters: memorySearchSchema,
-		async execute(_toolCallId, params) {
-			const results = withStore((store) => store.search(params.query, {
-				scopes: params.scope ? [scope(params.scope)] : undefined,
-				limit: params.limit,
-				recordUsage: true,
-			}));
-			return { content: [{ type: "text", text: formatResults(results) }], details: { results } };
-		},
-	});
-
-	pi.registerTool({
-		name: "memory_list",
-		label: "Memory List",
-		description: "List active local memories, optionally filtered by user or project scope.",
-		parameters: memoryListSchema,
-		async execute(_toolCallId, params) {
-			const results = withStore((store) => store.list({ scopes: params.scope ? [scope(params.scope)] : undefined, limit: params.limit }));
-			return { content: [{ type: "text", text: results.length ? results.map(formatMemory).join("\n\n") : "No memories found." }], details: { results } };
-		},
-	});
-
-	pi.registerTool({
-		name: "memory_update",
-		label: "Memory Update",
-		description: "Update an existing local memory by ID.",
-		parameters: memoryUpdateSchema,
-		async execute(_toolCallId, params) {
-			const record = withStore((store) => store.update(params.id, {
-				content: params.content,
-				scope: params.scope ? scope(params.scope) : undefined,
-				category: params.category ? category(params.category) : undefined,
-				tags: params.tags,
-				importance: params.importance,
-				alwaysInject: params.alwaysInject,
-			}));
-			return { content: [{ type: "text", text: record ? `Updated memory ${record.id}.` : `Memory ${params.id} not found.` }], details: { record } };
-		},
-	});
-
-	pi.registerTool({
-		name: "memory_delete",
-		label: "Memory Delete",
-		description: "Permanently delete a local memory by ID.",
-		parameters: memoryDeleteSchema,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (ctx.hasUI && !(await ctx.ui.confirm("Delete memory?", `Permanently delete ${params.id}?`))) {
-				return { content: [{ type: "text", text: "Memory deletion cancelled." }], details: { deleted: false } };
+			const action = String(params.action);
+			switch (action) {
+				case "search": {
+					const results = withStore((store) => store.search(params.query ?? "", {
+						scopes: params.scope ? [scope(params.scope)] : undefined,
+						limit: params.limit,
+						recordUsage: true,
+					}));
+					return { content: [{ type: "text", text: formatResults(results) }], details: { action, results } };
+				}
+				case "list": {
+					const results = withStore((store) => store.list({
+						scopes: params.scope ? [scope(params.scope)] : undefined,
+						limit: params.limit,
+					}));
+					return { content: [{ type: "text", text: results.length ? results.map(formatMemory).join("\n\n") : "No memories found." }], details: { action, results } };
+				}
+				case "save": {
+					if (!params.content?.trim()) throw new Error("The save action requires content");
+					const record = withStore((store) => store.save({
+						content: params.content,
+						scope: scope(params.scope),
+						category: category(params.category, "preference"),
+						tags: params.tags ?? [],
+						importance: params.importance ?? 0.5,
+						alwaysInject: params.alwaysInject ?? false,
+						source: { sessionId: ctx.sessionManager.getSessionId() },
+					}));
+					return { content: [{ type: "text", text: `Saved memory ${record.id}.` }], details: { action, record } };
+				}
+				case "update": {
+					if (!params.id) throw new Error("The update action requires id");
+					const record = withStore((store) => store.update(params.id, {
+						content: params.content,
+						scope: params.scope ? scope(params.scope) : undefined,
+						category: params.category ? category(params.category) : undefined,
+						tags: params.tags,
+						importance: params.importance,
+						alwaysInject: params.alwaysInject,
+					}));
+					return { content: [{ type: "text", text: record ? `Updated memory ${record.id}.` : `Memory ${params.id} not found.` }], details: { action, record } };
+				}
+				case "delete": {
+					if (!params.id) throw new Error("The delete action requires id");
+					if (ctx.hasUI && !(await ctx.ui.confirm("Delete memory?", `Permanently delete ${params.id}?`))) {
+						return { content: [{ type: "text", text: "Memory deletion cancelled." }], details: { action, deleted: false } };
+					}
+					const deleted = withStore((store) => store.delete(params.id!));
+					return { content: [{ type: "text", text: deleted ? `Deleted memory ${params.id}.` : `Memory ${params.id} not found.` }], details: { action, deleted, id: params.id } };
+				}
+				default:
+					throw new Error(`Unknown memory action: ${action}`);
 			}
-			const deleted = withStore((store) => store.delete(params.id));
-			return { content: [{ type: "text", text: deleted ? `Deleted memory ${params.id}.` : `Memory ${params.id} not found.` }], details: { deleted, id: params.id } };
 		},
 	});
 }
@@ -315,9 +288,10 @@ function memoryGuidance(): string {
 	return [
 		"Memory behavior:",
 		"- Be proactive but selective about stable user preferences, confirmed decisions, durable facts, and reusable workflows.",
-		"- When the user explicitly asks to remember something, or clearly states and confirms a stable preference or workflow, save a concise memory with memory_save.",
+		"- When the user explicitly asks to remember something, or you notice a stable pattern across the current work, use the memory tool with action save or update.",
 		"- Do not save transient task details, uncertain assumptions, credentials, tokens, private keys, raw auth files, or unrestricted transcripts.",
 		"- Prefer updating or reusing an existing memory over creating a duplicate.",
+		"- Notice repeated patterns in how the user works, but do not save every request or one-off detail; inferred memories should not use alwaysInject unless the user explicitly confirms them.",
 	].join("\n");
 }
 
