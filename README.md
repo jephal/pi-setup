@@ -45,8 +45,11 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Visible Plan → execution transitions
 - Memory
   - Local SQLite-backed user and project memories
-  - Explicit save, search, update, and delete tools
-  - Optional core-memory injection and bounded archival recall
+  - Main-agent-driven capture of stable patterns noticed during normal work
+  - One `memory` tool for search, save, update, list, and delete actions
+  - Importance-weighted freshness and duplicate consolidation
+  - Core-memory injection and bounded automatic recall with stale filtering
+  - `/memory-capture`, `/memory-recall`, and `/memory-stale` controls for recall and guidance
 - Local notes integration
   - Agent-first filesystem tools for listing, searching, reading, and writing Markdown notes
   - Directory-scoped path protection with hidden metadata directories excluded from discovery
