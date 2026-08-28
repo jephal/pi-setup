@@ -530,11 +530,20 @@ export default function (pi: ExtensionAPI) {
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Delegate tasks to specialized subagents with isolated context.",
+			"Delegate larger or context-heavy repository work to specialized subagents with isolated context; handle small, localized tasks directly.",
+			"Use parallel mode for independent workstreams and chain mode for implementation followed by review or feedback application.",
+			"Keep delegation one level deep: a subagent must not invoke another subagent.",
+			"For refactoring, prefer git mv for one-to-one moves and ast-grep for mechanical transformations where applicable; review and validate delegated work.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
+		promptSnippet: "Delegate larger or parallelizable repository work to isolated subagents",
+		promptGuidelines: [
+			"Use this tool for larger repository workstreams, parallelizable tasks, or work that would otherwise cause context bloat; do small localized work directly.",
+			"Keep delegation one level deep. Subagents must complete their assigned work without invoking this tool themselves.",
+			"For substantial implementation work, use a worker and then a reviewer; use a final worker step to apply review feedback when needed.",
+		],
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {

@@ -113,6 +113,7 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 			"Use memory action search before saving or updating when a related memory may already exist.",
 			"Use memory action save when the current conversation reveals a stable preference, decision, fact, or workflow, even if the user did not say remember.",
 			"Infer patterns conservatively: prefer repeated behavior or clear durable signals, not one-off requests or temporary task context.",
+			"Apply memories by relevance, recency, importance, and confirmed reuse. Treat memories that have not been relevant for a long time as stale and avoid relying on them without reconfirmation.",
 			"Use memory action update to consolidate an existing memory. Use alwaysInject only for explicitly confirmed core memories, not inferred patterns.",
 			"Never save credentials, tokens, private keys, raw auth files, sensitive values, or unrestricted conversation transcripts.",
 		],

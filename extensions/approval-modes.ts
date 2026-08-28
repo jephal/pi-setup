@@ -219,9 +219,9 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		name: "plan",
 		label: "Plan",
 		description: "Create, update, review, or clear a complete Markdown plan scoped to this Pi session.",
-		promptSnippet: "Create a full structured plan for a larger change",
+		promptSnippet: "Create a full structured plan for substantial multi-step changes",
 		promptGuidelines: [
-			"Use plan action=create for larger changes. Start with a concise 'In short' section of 3–7 bullets and a short 'What happens next' section; put technical detail below those sections.",
+			"Use plan action=create for substantial multi-step changes. Start with a concise 'In short' section of 3–7 bullets and a short 'What happens next' section; put technical detail below those sections.",
 			"Prefer a plan the user can understand quickly. Include rationale, trade-offs, and validation when useful without repeating the same information.",
 			"Use plan action=update after user feedback, plan action=status to inspect progress, and plan action=clear when done.",
 			"Provide structured steps for plan create/update so they can be shown as Task checkpoints in the Markdown preview and tracked during execution.",
@@ -537,8 +537,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			plan: "You are in read-only plan mode. Do not edit or write files. Use only safe inspection tools and simple read-only bash commands.",
 		};
 		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n`;
-		content += "For larger or multi-step changes, create a complete but concise Plan: before acting. Start with an 'In short' section of 3–7 user-readable bullets and a 'What happens next' section of 3–7 steps. Include rationale, trade-offs, visualizations, implementation phases, and validation when useful, but keep technical detail below the summary and avoid repetition.\n\n";
-		content += "When the plan tool is available, use it immediately for larger changes: do not write the plan as normal chat. Put the concise summary, next steps, and useful technical detail in plan.create so the plan preview and review selector can appear.\n\n";
+		content += "For substantial multi-step changes, create a complete but concise Plan: before acting. Start with an 'In short' section of 3–7 user-readable bullets and a 'What happens next' section of 3–7 steps. Include rationale, trade-offs, visualizations, implementation phases, and validation when useful, but keep technical detail below the summary and avoid repetition.\n\n";
+		content += "When the plan tool is available, use it immediately for substantial multi-step changes: do not write the plan as normal chat. Put the concise summary, next steps, and useful technical detail in plan.create so the plan preview and review selector can appear.\n\n";
 		content += mode === "plan"
 			? "Plan mode is the locked-in planning workflow: use the plan tool to store the complete Markdown plan and structured phases, then wait for its small review selector before executing. Do not edit or write files. You may use ask_questions for clarification, then revise the complete plan. Wait for the user’s plan decision before executing.\n"
 			: "Outside Plan mode, a Plan: is guidance rather than a blocking approval step. Follow the current approval mode and do not wait for a plan decision UI. If a plan tool result says PLAN MODE EXITED or executionReady, begin implementation immediately instead of continuing to plan.\n";

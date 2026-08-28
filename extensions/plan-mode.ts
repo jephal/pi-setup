@@ -134,9 +134,9 @@ export default function planMode(pi: ExtensionAPI): void {
 		name: "plan",
 		label: "Plan",
 		description: "Create, update, inspect, or clear a full Markdown plan scoped to the current Git branch. The plan content is shown in the normal transcript, with a review gate in locked-in Plan mode.",
-		promptSnippet: "Create and review a structured branch-scoped plan",
+		promptSnippet: "Create and review a structured plan for substantial multi-step changes",
 		promptGuidelines: [
-			"Use plan action=create for a larger change. Start with a concise 'In short' section of 3–7 bullets and a short 'What happens next' section; put technical detail below those sections.",
+			"Use plan action=create for substantial multi-step changes; handle small, localized tasks directly. Start with a concise 'In short' section of 3–7 bullets and a short 'What happens next' section; put technical detail below those sections.",
 			"Prefer a plan the user can understand quickly. Do not repeat the same rationale in multiple sections or make every detail equally prominent.",
 			"Use plan action=update when the user gives plan feedback.",
 			"Provide structured steps for plan create/update so they can be shown as Task checkpoints in the Markdown preview and tracked during execution.",
