@@ -4,6 +4,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { MemoryStore } from "../src/memory/db.js";
+import { MemoryOperationQueue } from "../src/memory/operation-queue.js";
 import type { MemoryCategory, MemoryScope, MemorySearchResult } from "../src/memory/types.js";
 
 const memoryDir = () => join(getAgentDir(), "memory");
@@ -55,13 +56,18 @@ async function saveSettings(settings: MemorySettings): Promise<void> {
 	await writeFile(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
 
-function withStore<T>(operation: (store: MemoryStore) => T): T {
-	const store = new MemoryStore(databasePath());
-	try {
-		return operation(store);
-	} finally {
-		store.close();
-	}
+const memoryOperationQueue = new MemoryOperationQueue();
+
+/** Serialize store lifecycles so concurrent tool calls cannot race SQLite setup or writes. */
+function withStore<T>(operation: (store: MemoryStore) => T): Promise<T> {
+	return memoryOperationQueue.run(() => {
+		const store = new MemoryStore(databasePath());
+		try {
+			return operation(store);
+		} finally {
+			store.close();
+		}
+	});
 }
 
 function scope(value: unknown, fallback: MemoryScope = "user"): MemoryScope {
@@ -122,7 +128,7 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 			const action = String(params.action);
 			switch (action) {
 				case "search": {
-					const results = withStore((store) => store.search(params.query ?? "", {
+					const results = await withStore((store) => store.search(params.query ?? "", {
 						scopes: params.scope ? [scope(params.scope)] : undefined,
 						limit: params.limit,
 						recordUsage: true,
@@ -130,7 +136,7 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 					return { content: [{ type: "text", text: formatResults(results) }], details: { action, results } };
 				}
 				case "list": {
-					const results = withStore((store) => store.list({
+					const results = await withStore((store) => store.list({
 						scopes: params.scope ? [scope(params.scope)] : undefined,
 						limit: params.limit,
 					}));
@@ -138,7 +144,7 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 				}
 				case "save": {
 					if (!params.content?.trim()) throw new Error("The save action requires content");
-					const record = withStore((store) => store.save({
+					const record = await withStore((store) => store.save({
 						content: params.content,
 						scope: scope(params.scope),
 						category: category(params.category, "preference"),
@@ -151,7 +157,7 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 				}
 				case "update": {
 					if (!params.id) throw new Error("The update action requires id");
-					const record = withStore((store) => store.update(params.id, {
+					const record = await withStore((store) => store.update(params.id, {
 						content: params.content,
 						scope: params.scope ? scope(params.scope) : undefined,
 						category: params.category ? category(params.category) : undefined,
@@ -166,7 +172,7 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 					if (ctx.hasUI && !(await ctx.ui.confirm("Delete memory?", `Permanently delete ${params.id}?`))) {
 						return { content: [{ type: "text", text: "Memory deletion cancelled." }], details: { action, deleted: false } };
 					}
-					const deleted = withStore((store) => store.delete(params.id!));
+					const deleted = await withStore((store) => store.delete(params.id!));
 					return { content: [{ type: "text", text: deleted ? `Deleted memory ${params.id}.` : `Memory ${params.id} not found.` }], details: { action, deleted, id: params.id } };
 				}
 				default:
@@ -184,7 +190,7 @@ function registerMemoryCommands(pi: ExtensionAPI): void {
 				ctx.ui.notify("Usage: /remember <fact or preference>", "warning");
 				return;
 			}
-			const record = withStore((store) => store.save({
+			const record = await withStore((store) => store.save({
 				content: args.trim(),
 				scope: "user",
 				category: "fact",
@@ -200,7 +206,7 @@ function registerMemoryCommands(pi: ExtensionAPI): void {
 	pi.registerCommand("memories", {
 		description: "Search or list local memories",
 		handler: async (args, ctx) => {
-			const results = withStore((store) => args.trim() ? store.search(args.trim(), { limit: 10, recordUsage: true }) : store.list({ limit: 20 }));
+			const results = await withStore((store) => args.trim() ? store.search(args.trim(), { limit: 10, recordUsage: true }) : store.list({ limit: 20 }));
 			ctx.ui.notify(formatResults(results as MemorySearchResult[]), "info");
 		},
 	});
@@ -214,7 +220,7 @@ function registerMemoryCommands(pi: ExtensionAPI): void {
 				return;
 			}
 			if (ctx.hasUI && !(await ctx.ui.confirm("Delete memory?", `Permanently delete ${id}?`))) return;
-			const deleted = withStore((store) => store.delete(id));
+			const deleted = await withStore((store) => store.delete(id));
 			ctx.ui.notify(deleted ? `Deleted memory ${id}.` : `Memory ${id} not found.`, deleted ? "info" : "warning");
 		},
 	});
@@ -300,7 +306,7 @@ function registerRecallHook(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event) => {
 		const settings = await loadSettings();
 		const core = settings.coreMemory
-			? withStore((store) => store.core({
+			? await withStore((store) => store.core({
 				limit: settings.coreLimit,
 				maxChars: settings.maxCoreChars,
 				maxAgeDays: settings.staleAfterDays,
@@ -308,7 +314,7 @@ function registerRecallHook(pi: ExtensionAPI): void {
 			: [];
 		const coreIds = new Set(core.map((record) => record.id));
 		const archival = settings.autoRecall && event.prompt.trim()
-			? withStore((store) => store.search(event.prompt, {
+			? await withStore((store) => store.search(event.prompt, {
 				scopes: ["user"],
 				limit: settings.recallLimit,
 				maxAgeDays: settings.staleAfterDays,

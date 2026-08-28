@@ -5,7 +5,29 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryStore } from "../src/memory/db.ts";
+import { MemoryOperationQueue } from "../src/memory/operation-queue.ts";
 import { memoryFreshnessWindowDays } from "../src/memory/ranking.ts";
+
+test("serializes concurrent memory operations and recovers after a failure", async () => {
+	const queue = new MemoryOperationQueue();
+	let active = 0;
+	let maximumActive = 0;
+
+	const run = (value: string, shouldFail = false) => queue.run(async () => {
+		active += 1;
+		maximumActive = Math.max(maximumActive, active);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		active -= 1;
+		if (shouldFail) throw new Error("expected failure");
+		return value;
+	});
+
+	const results = await Promise.allSettled([run("first", true), run("second"), run("third")]);
+	assert.equal(maximumActive, 1);
+	assert.equal(results[0].status, "rejected");
+	assert.deepEqual(results.slice(1).map((result) => result.status === "fulfilled" ? result.value : result.reason), ["second", "third"]);
+	assert.equal(await queue.run(() => "after failure"), "after failure");
+});
 
 test("importance controls the automatic freshness window", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-memory-"));
