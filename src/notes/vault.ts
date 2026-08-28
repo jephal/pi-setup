@@ -1,10 +1,17 @@
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { ensureFrontmatter } from "./frontmatter.ts";
-import { mkdir, lstat, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { Worker } from "node:worker_threads";
+import { copyFile, link, mkdir, lstat, readFile, readdir, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 
 export const MAX_NOTE_BYTES = 5 * 1024 * 1024;
 export const MAX_SEARCH_FILES = 5_000;
+const MAX_REGEX_QUERY_CHARS = 256;
+const REGEX_MATCH_TIMEOUT_MS = 250;
+const MAX_SEARCH_DURATION_MS = 30_000;
+const MAX_SNIPPET_LINE_CHARS = 500;
+const MAX_GLOB_CHARS = 256;
 
 export interface NotesNote {
 	path: string;
@@ -18,11 +25,31 @@ export interface NotesSearchMatch {
 	snippet: string;
 }
 
+export type NotesSearchMode = "literal" | "regex" | "filename";
+
+export interface NotesSearchOptions {
+	mode?: NotesSearchMode;
+	glob?: string;
+	caseSensitive?: boolean;
+	contextLines?: number;
+	pathsOnly?: boolean;
+	signal?: AbortSignal;
+}
+
 export type NotesWriteMode = "create" | "overwrite" | "append";
 
 export interface NotesWriteResult {
 	path: string;
 	mode: NotesWriteMode;
+	bytes: number;
+}
+
+export type NotesTransferAction = "copy" | "move";
+
+export interface NotesTransferResult {
+	action: NotesTransferAction;
+	source: string;
+	destination: string;
 	bytes: number;
 }
 
@@ -62,44 +89,77 @@ export class NotesVault {
 		return notes;
 	}
 
-	async search(query: string, directory = ".", limit = 20): Promise<NotesSearchMatch[]> {
+	async search(query: string, directory = ".", limit = 20, options: NotesSearchOptions = {}): Promise<NotesSearchMatch[]> {
 		const normalizedQuery = query.trim();
 		if (!normalizedQuery) throw new Error("Search query cannot be empty.");
 
+		const mode = options.mode ?? "literal";
+		if (mode !== "literal" && mode !== "regex" && mode !== "filename") {
+			throw new Error(`Unsupported Notes search mode: ${mode}`);
+		}
 		const boundedLimit = Math.min(boundLimit(limit), 100);
+		const contextLines = boundContextLines(options.contextLines);
+		const deadline = Date.now() + MAX_SEARCH_DURATION_MS;
+		if (mode === "regex") validateRegex(normalizedQuery, options.caseSensitive === true);
 		const root = await this.getRoot();
 		const start = await this.resolveDirectory(root, directory);
 		const matches: NotesSearchMatch[] = [];
+		const matchesText = mode === "regex" ? undefined : createSearchMatcher(normalizedQuery, options.caseSensitive === true);
+		const matchesGlob = createGlobMatcher(options.glob);
+		const regexSearch = mode === "regex" ? new RegexSearchWorker(normalizedQuery, options.caseSensitive === true) : undefined;
 		let filesVisited = 0;
-		const needle = normalizedQuery.toLocaleLowerCase();
 
-		for await (const notePath of this.walkNotePaths(start, root)) {
-			if (matches.length >= boundedLimit) break;
-			if (++filesVisited > MAX_SEARCH_FILES) break;
+		try {
+			for await (const notePath of this.walkNotePaths(start, root)) {
+				if (options.signal?.aborted) throw new Error("Notes search was cancelled.");
+				if (Date.now() > deadline) throw new Error(`Notes search exceeded ${MAX_SEARCH_DURATION_MS}ms; narrow the path or query.`);
+				if (matches.length >= boundedLimit) break;
+				if (++filesVisited > MAX_SEARCH_FILES) break;
+				const absolutePath = join(root, ...notePath.split("/"));
+				const scopedPath = relative(start, absolutePath).split(sep).join("/");
+				if (!matchesGlob(scopedPath)) continue;
 
-			const absolutePath = join(root, ...notePath.split("/"));
-			const noteStat = await lstat(absolutePath);
-			if (noteStat.size > MAX_NOTE_BYTES) continue;
-			const content = await readFile(absolutePath, "utf8");
-			const lowerContent = content.toLocaleLowerCase();
-			const lowerPath = notePath.toLocaleLowerCase();
-			const pathMatch = lowerPath.includes(needle);
-			const index = lowerContent.indexOf(needle);
-			if (!pathMatch && index < 0) continue;
+				if (mode === "filename") {
+					if (matchesText!(notePath) < 0) continue;
+					matches.push({ path: notePath, snippet: options.pathsOnly ? "Path match" : "Filename match" });
+					continue;
+				}
 
-			if (index < 0) {
-				matches.push({ path: notePath, snippet: "Filename match" });
-				continue;
+				const filenameIndex = mode === "literal" ? matchesText!(notePath) : -1;
+				const noteStat = await lstat(absolutePath);
+				if (noteStat.size > MAX_NOTE_BYTES) continue;
+				if (options.pathsOnly && filenameIndex >= 0) {
+					matches.push({ path: notePath, snippet: "Path match" });
+					continue;
+				}
+
+				const content = await readFile(absolutePath, "utf8");
+				const contentIndex = mode === "regex"
+					? await regexSearch!.find(content)
+					: matchesText!(content);
+				if (contentIndex < 0) {
+					if (filenameIndex >= 0) matches.push({ path: notePath, snippet: "Filename match" });
+					continue;
+				}
+				if (options.pathsOnly) {
+					matches.push({ path: notePath, snippet: "Path match" });
+					continue;
+				}
+
+				const lines = content.split(/\r?\n/);
+				const line = content.slice(0, contentIndex).split(/\r?\n/).length;
+				const startLine = Math.max(0, line - 1 - contextLines);
+				const endLine = Math.min(lines.length, line + contextLines);
+				const snippet = lines.slice(startLine, endLine)
+				.map((line) => line.length > MAX_SNIPPET_LINE_CHARS ? `${line.slice(0, MAX_SNIPPET_LINE_CHARS)}…` : line)
+				.join("\n")
+				.trimEnd() || normalizedQuery;
+				matches.push({ path: notePath, line, snippet });
 			}
-
-			const line = content.slice(0, index).split("\n").length;
-			const lineStart = content.lastIndexOf("\n", index - 1) + 1;
-			const lineEnd = content.indexOf("\n", index);
-			const sourceLine = content.slice(lineStart, lineEnd < 0 ? content.length : lineEnd).trim();
-			matches.push({ path: notePath, line, snippet: sourceLine || normalizedQuery });
+			return matches;
+		} finally {
+			await regexSearch?.close();
 		}
-
-		return matches;
 	}
 
 	async resolveNoteFile(notePath: string): Promise<string> {
@@ -153,6 +213,58 @@ export class NotesVault {
 		});
 	}
 
+	async transferNote(sourcePath: string, destinationPath: string, action: NotesTransferAction): Promise<NotesTransferResult> {
+		if (action !== "copy" && action !== "move") throw new Error(`Unsupported Notes transfer action: ${action}`);
+
+		const root = await this.getRoot();
+		const source = await this.resolveExistingNote(root, sourcePath);
+		let destination = await this.resolveWritePath(root, destinationPath, false);
+		if (source === destination) throw new Error("Source and destination must be different notes.");
+
+		return this.withMutationLocks([source, destination], async () => {
+			const sourceEntry = await lstat(source);
+			if (sourceEntry.isSymbolicLink()) throw new Error(`Refusing to transfer through a symlink: ${sourcePath}`);
+			if (!sourceEntry.isFile()) throw new Error(`Notes source is not a file: ${sourcePath}`);
+			if (sourceEntry.size > MAX_NOTE_BYTES) {
+				throw new Error(`Note is too large to transfer (maximum ${MAX_NOTE_BYTES} bytes): ${sourcePath}`);
+			}
+
+			const destinationEntry = await lstat(destination).catch((error: unknown) => {
+				if (isMissing(error)) return undefined;
+				throw error;
+			});
+			if (destinationEntry?.isSymbolicLink()) throw new Error(`Refusing to overwrite a symlink: ${destinationPath}`);
+			if (destinationEntry) throw new Error(`Destination note already exists: ${destinationPath}`);
+
+			destination = await this.resolveWritePath(root, destinationPath);
+			const finalDestinationEntry = await lstat(destination).catch((error: unknown) => {
+				if (isMissing(error)) return undefined;
+				throw error;
+			});
+			if (finalDestinationEntry?.isSymbolicLink()) throw new Error(`Refusing to overwrite a symlink: ${destinationPath}`);
+			if (finalDestinationEntry) throw new Error(`Destination note already exists: ${destinationPath}`);
+
+			if (action === "copy") await copyFile(source, destination, constants.COPYFILE_EXCL);
+			else await moveNoClobber(source, destination);
+
+			const finalStat = await stat(destination);
+			return {
+				action,
+				source: this.toVaultPath(root, source),
+				destination: this.toVaultPath(root, destination),
+				bytes: finalStat.size,
+			};
+		});
+	}
+
+	private withMutationLocks<T>(paths: string[], operation: () => Promise<T>): Promise<T> {
+		const uniquePaths = [...new Set(paths)].sort();
+		const acquire = (index: number): Promise<T> => index >= uniquePaths.length
+			? operation()
+			: withFileMutationQueue(uniquePaths[index], () => acquire(index + 1));
+		return acquire(0);
+	}
+
 	private async resolveDirectory(root: string, requestedPath: string): Promise<string> {
 		const relativePath = normalizeRelativePath(requestedPath, true);
 		const candidate = join(root, ...relativePath.split("/"));
@@ -178,16 +290,22 @@ export class NotesVault {
 		return resolved;
 	}
 
-	private async resolveWritePath(root: string, requestedPath: string): Promise<string> {
+	private async resolveWritePath(root: string, requestedPath: string, createParents = true): Promise<string> {
 		const relativePath = normalizeRelativePath(requestedPath);
 		const segments = relativePath.split("/");
 		let current = root;
-		for (const segment of segments.slice(0, -1)) {
+		for (let index = 0; index < segments.length - 1; index += 1) {
+			const segment = segments[index];
 			const next = join(current, segment);
 			const entry = await lstat(next).catch((error: unknown) => {
 				if (isMissing(error)) return undefined;
 				throw error;
 			});
+			if (!entry && !createParents) {
+				const target = join(current, ...segments.slice(index));
+				this.assertInside(root, target);
+				return target;
+			}
 			if (!entry) await mkdir(next, { recursive: true });
 			const currentEntry = await lstat(next);
 			if (currentEntry.isSymbolicLink()) {
@@ -255,6 +373,165 @@ function normalizeRelativePath(value: string, allowDirectory = false): string {
 function boundLimit(value: number): number {
 	if (!Number.isFinite(value)) return 100;
 	return Math.max(1, Math.min(500, Math.floor(value)));
+}
+
+function boundContextLines(value: number | undefined): number {
+	if (value === undefined || !Number.isFinite(value)) return 0;
+	return Math.max(0, Math.min(5, Math.floor(value)));
+}
+
+function validateRegex(query: string, caseSensitive: boolean): void {
+	if (query.length > MAX_REGEX_QUERY_CHARS) {
+		throw new Error(`Notes search regular expressions are limited to ${MAX_REGEX_QUERY_CHARS} characters.`);
+	}
+	try {
+		new RegExp(query, caseSensitive ? "" : "i");
+	} catch (error) {
+		throw new Error(`Invalid Notes search regular expression: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+function createSearchMatcher(query: string, caseSensitive: boolean): (value: string) => number {
+	const needle = caseSensitive ? query : query.toLocaleLowerCase();
+	return (value) => (caseSensitive ? value : value.toLocaleLowerCase()).indexOf(needle);
+}
+
+class RegexSearchWorker {
+	private readonly worker: Worker;
+	private readonly ready: Promise<void>;
+	private resolveReady!: () => void;
+	private rejectReady!: (error: unknown) => void;
+	private pending?: { resolve: (index: number) => void; reject: (error: unknown) => void; timer: ReturnType<typeof setTimeout> };
+	private failure?: Error;
+	private closed = false;
+
+	constructor(query: string, caseSensitive: boolean) {
+		this.worker = new Worker(new URL("./regex-worker.mjs", import.meta.url), {
+			workerData: { query, flags: caseSensitive ? "" : "i" },
+		});
+		this.ready = new Promise((resolve, reject) => {
+			this.resolveReady = resolve;
+			this.rejectReady = reject;
+		});
+		this.worker.on("message", (message: { ready?: boolean; index?: number; error?: string }) => {
+			if (message.ready) {
+				this.resolveReady();
+				return;
+			}
+			if (!this.pending) return;
+			const pending = this.pending;
+			this.pending = undefined;
+			clearTimeout(pending.timer);
+			if (message.error) pending.reject(new Error(message.error));
+			else if (typeof message.index === "number") pending.resolve(message.index);
+			else pending.reject(new Error("Regex search worker returned an invalid result."));
+		});
+		this.worker.on("error", (error: Error) => {
+			this.failure = error;
+			this.rejectReady(error);
+			const pending = this.pending;
+			if (!pending) return;
+			this.pending = undefined;
+			clearTimeout(pending.timer);
+			pending.reject(error);
+		});
+		this.worker.on("exit", (code) => {
+			if (code === 0 || this.closed || this.failure) return;
+			const error = new Error(`Regex search worker exited with code ${code}.`);
+			this.failure = error;
+			this.rejectReady(error);
+			const pending = this.pending;
+			if (!pending) return;
+			this.pending = undefined;
+			clearTimeout(pending.timer);
+			pending.reject(error);
+		});
+	}
+
+	async find(content: string): Promise<number> {
+		await this.ready;
+		if (this.closed) throw new Error("Regex search worker is closed.");
+		if (this.failure) throw this.failure;
+		return new Promise((resolveResult, reject) => {
+			const timer = setTimeout(() => {
+				this.closed = true;
+				this.pending = undefined;
+				reject(new Error(`Notes regex search exceeded ${REGEX_MATCH_TIMEOUT_MS}ms on one note.`));
+				void this.worker.terminate().catch(() => undefined);
+			}, REGEX_MATCH_TIMEOUT_MS);
+			this.pending = { resolve: resolveResult, reject, timer };
+			try {
+				this.worker.postMessage({ content });
+			} catch (error) {
+				this.pending = undefined;
+				clearTimeout(timer);
+				reject(error);
+			}
+		});
+	}
+
+	async close(): Promise<void> {
+		if (this.closed) return;
+		this.closed = true;
+		const pending = this.pending;
+		this.pending = undefined;
+		if (pending) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error("Regex search worker closed."));
+		}
+		await this.worker.terminate().catch(() => undefined);
+	}
+}
+
+async function moveNoClobber(source: string, destination: string): Promise<void> {
+	try {
+		await link(source, destination);
+	} catch (error) {
+		if (!isCrossDevice(error)) throw error;
+		await copyFile(source, destination, constants.COPYFILE_EXCL);
+	}
+	try {
+		await unlink(source);
+	} catch (error) {
+		await unlink(destination).catch(() => undefined);
+		throw error;
+	}
+}
+
+function createGlobMatcher(glob: string | undefined): (value: string) => boolean {
+	if (!glob?.trim()) return () => true;
+	const normalized = glob.trim().replaceAll("\\", "/");
+	const segments = normalized.split("/").filter((segment) => segment && segment !== ".");
+	if (normalized.includes("\0") || normalized.startsWith("/") || segments.some((segment) => segment === ".." || segment.startsWith("."))) {
+		throw new Error("Notes search globs must stay inside the configured vault and cannot target hidden paths.");
+	}
+	const patternInput = segments.join("/");
+	if (!patternInput) return () => true;
+	let pattern = "^";
+	for (let index = 0; index < patternInput.length; index += 1) {
+		const character = patternInput[index];
+		if (character === "*" && patternInput[index + 1] === "*") {
+			index += 1;
+			if (patternInput[index + 1] === "/") {
+				index += 1;
+				pattern += "(?:.*/)?";
+			} else {
+				pattern += ".*";
+			}
+		} else if (character === "*") {
+			pattern += "[^/]*";
+		} else if (character === "?") {
+			pattern += "[^/]";
+		} else {
+			pattern += character.replace(/[\\^$+{}()[\].|]/g, "\\$&");
+		}
+	}
+	const expression = new RegExp(`${pattern}$`);
+	return (value) => expression.test(value);
+}
+
+function isCrossDevice(error: unknown): boolean {
+	return Boolean(error && typeof error === "object" && "code" in error && (error.code === "EXDEV" || error.code === "EPERM"));
 }
 
 function isMissing(error: unknown): boolean {

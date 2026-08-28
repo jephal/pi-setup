@@ -29,6 +29,49 @@ test("serializes concurrent memory operations and recovers after a failure", asy
 	assert.equal(await queue.run(() => "after failure"), "after failure");
 });
 
+test("recall hook awaits archival search before filtering core memories", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-memory-hook-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = root;
+	const store = new MemoryStore(join(root, "memory", "memory.sqlite"));
+	store.save({
+		content: "Always use concise answers",
+		scope: "user",
+		category: "preference",
+		tags: [],
+		importance: 0.9,
+		alwaysInject: true,
+	});
+	store.save({
+		content: "Use concise answers for summaries",
+		scope: "user",
+		category: "workflow",
+		tags: [],
+		importance: 0.7,
+	});
+	store.close();
+
+	try {
+		const handlers = new Map<string, (event: { prompt: string; systemPrompt: string }) => Promise<any>>();
+		const { default: memoryExtension } = await import("./memory.ts");
+		const fakePi = {
+			registerTool() {},
+			registerCommand() {},
+			on(name: string, handler: (event: { prompt: string; systemPrompt: string }) => Promise<any>) {
+				handlers.set(name, handler);
+			},
+		};
+		memoryExtension(fakePi as any);
+		const result = await handlers.get("before_agent_start")!({ prompt: "concise answers", systemPrompt: "base" });
+		assert.match(result.message.content, /\[CORE USER MEMORY\]/);
+		assert.match(result.message.content, /Use concise answers for summaries/);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("importance controls the automatic freshness window", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-memory-"));
 	const databasePath = join(root, "memory.sqlite");

@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { MemoryStore } from "../src/memory/db.js";
-import { MemoryOperationQueue } from "../src/memory/operation-queue.js";
-import type { MemoryCategory, MemoryScope, MemorySearchResult } from "../src/memory/types.js";
+import { MemoryStore } from "../src/memory/db.ts";
+import { MemoryOperationQueue } from "../src/memory/operation-queue.ts";
+import type { MemoryCategory, MemoryScope, MemorySearchResult } from "../src/memory/types.ts";
 
 const memoryDir = () => join(getAgentDir(), "memory");
 const databasePath = () => join(memoryDir(), "memory.sqlite");
@@ -314,12 +314,12 @@ function registerRecallHook(pi: ExtensionAPI): void {
 			: [];
 		const coreIds = new Set(core.map((record) => record.id));
 		const archival = settings.autoRecall && event.prompt.trim()
-			? await withStore((store) => store.search(event.prompt, {
+			? (await withStore((store) => store.search(event.prompt, {
 				scopes: ["user"],
 				limit: settings.recallLimit,
 				maxAgeDays: settings.staleAfterDays,
 				recordUsage: true,
-			})).filter((record) => !coreIds.has(record.id))
+			}))).filter((record) => !coreIds.has(record.id))
 			: [];
 		const lines: string[] = [];
 		if (core.length > 0) {
