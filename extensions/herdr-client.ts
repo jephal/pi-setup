@@ -171,12 +171,14 @@ export function extractTabWorkspaceId(value: unknown): string | undefined {
 
 export function isNotFound(error: unknown): boolean {
   if (!(error instanceof HerdrError)) return false;
-  const code = error.code.toLowerCase();
-  return code === "not_found" ||
-    code === "pane_not_found" ||
-    code === "pane_gone" ||
-    code === "tab_not_found" ||
-    code === "tab_gone";
+  const code = error.code.toUpperCase().replaceAll("-", "_");
+  return [
+    "NOT_FOUND",
+    "PANE_GONE",
+    "PANE_NOT_FOUND",
+    "TAB_GONE",
+    "TAB_NOT_FOUND",
+  ].includes(code);
 }
 
 export function parseVersion(value: string): { major: number; minor: number; patch: number } | undefined {
