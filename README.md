@@ -214,11 +214,12 @@ When Pi runs inside Herdr (`HERDR_ENV=1`), the `herdr_shell` tool lets the model
 ```text
 herdr_shell({ action: "open", command: "pnpm dev" })
 herdr_shell({ action: "read_output", lines: 80 })
-herdr_shell({ action: "status" })
+herdr_shell({ action: "status" })              # inspect all live panes in the current tab
+herdr_shell({ action: "status", cwd: "/path/to/project" })
 herdr_shell({ action: "close" })
 ```
 
-The integration creates a right-side pane in the current tab with `herdr pane split --current --direction right --no-focus`, then runs the command in that pane. It does not create a new tab or workspace. `read_output` uses `herdr pane read --source recent-unwrapped`, so the model can inspect the same recent output that is visible in Herdr. Output is bounded; it does not wait for a development server to exit.
+The integration creates a right-side pane in the current tab with `herdr pane split --current --direction right --no-focus`, then runs the command in that pane. It does not create a new tab or workspace. `status` without `cwd` queries the live Herdr pane board for the current workspace/tab. Normal operations validate a cached target with the cheap `pane get` call; a full pane list is used for inventory and recovery. This means panes closed manually are detected without replacing the persistent binding cache: `open` and `run` recreate confirmed-dead managed panes, while `status` and `read_output` report the refreshed board. A short-lived in-memory inventory cache is scoped to the current Pi process and is never used as the source of truth. `read_output` uses `herdr pane read --source recent-unwrapped`, so the model can inspect the same recent output that is visible in Herdr. Output is bounded; it does not wait for a development server to exit.
 
 Use Pi's built-in `bash` tool for short-lived commands whose stdout/stderr the model needs in the current turn. Use `herdr_shell` for development servers, watchers, log processes, and other commands that should keep running visibly in Herdr. Reload Pi after updating the package:
 
@@ -228,6 +229,6 @@ Use Pi's built-in `bash` tool for short-lived commands whose stdout/stderr the m
 
 Herdr is optional. If Pi is not running inside Herdr, `herdr_shell` returns an explanatory error and normal `bash` remains available. Set `HERDR_BIN` if the Herdr executable is not on `PATH`. The minimum supported Herdr version is `0.7.5`.
 
-Herdr panes are intentionally not closed when Pi reloads or exits. Ask the model to use `action: "close"`, or stop the process in Herdr, when the server should end.
+Herdr panes are intentionally not closed when Pi reloads or exits. Ask the model to use `action: "close"`, or stop the process in Herdr, when the server should end. If a user closes a pane manually and the model still needs to show something visibly, it should use `open` or `run` to create a fresh pane rather than reuse the old pane ID.
 
 For reproducible releases, replace `#main` references with version tags such as `#v0.1.0` after tagging the feature repositories.

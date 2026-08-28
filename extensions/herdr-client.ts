@@ -170,8 +170,13 @@ export function extractTabWorkspaceId(value: unknown): string | undefined {
 }
 
 export function isNotFound(error: unknown): boolean {
-  return error instanceof HerdrError &&
-    (error.code === "NOT_FOUND" || error.code === "PANE_GONE" || error.code === "TAB_GONE");
+  if (!(error instanceof HerdrError)) return false;
+  const code = error.code.toLowerCase();
+  return code === "not_found" ||
+    code === "pane_not_found" ||
+    code === "pane_gone" ||
+    code === "tab_not_found" ||
+    code === "tab_gone";
 }
 
 export function parseVersion(value: string): { major: number; minor: number; patch: number } | undefined {

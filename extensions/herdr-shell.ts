@@ -22,6 +22,7 @@ const DEFAULT_OUTPUT_LINES = 80;
 const MAX_OUTPUT_LINES = 500;
 const COMMAND_TIMEOUT_MS = 15_000;
 const SHELL_STARTUP_DELAY_MS = 6_000;
+const LIVE_INVENTORY_TTL_MS = 2_000;
 const STATE_FILE = join(getAgentDir(), "herdr-shell.json");
 
 const HerdrShellParameters = Type.Object({
@@ -60,9 +61,29 @@ interface PersistedState {
   bindings: HerdrBinding[];
 }
 
-interface HerdrContext {
+export interface HerdrContext {
   workspaceId: string;
   parentTabId?: string;
+}
+
+export interface HerdrLivePane {
+  paneId: string;
+  workspaceId: string;
+  tabId?: string;
+  cwd?: string;
+  foregroundCwd?: string;
+  focused: boolean;
+  agent?: string;
+  agentStatus?: string;
+  terminalTitle?: string;
+  lastSeen: number;
+}
+
+export interface HerdrLiveInventory {
+  workspaceId: string;
+  parentTabId?: string;
+  panes: HerdrLivePane[];
+  refreshedAt: number;
 }
 
 interface HerdrOpenCommandRequest {
@@ -83,6 +104,100 @@ function describeCommand(command: string | undefined): string {
   if (!command) return "interactive shell";
   const firstLine = command.split(/\r?\n/, 1)[0] ?? command;
   return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
+}
+
+function extractLivePanes(value: unknown, context: HerdrContext, now: number): HerdrLivePane[] {
+  const result = getRecord(value, "result") ?? value;
+  if (!isRecord(result) || !Array.isArray(result.panes)) return [];
+
+  return result.panes.flatMap((value): HerdrLivePane[] => {
+    if (!isRecord(value)) return [];
+    const paneId = getString(value, "pane_id", "paneId", "id");
+    const workspaceId = getString(value, "workspace_id", "workspaceId") ?? context.workspaceId;
+    const tabId = getString(value, "tab_id", "tabId");
+    if (!paneId || workspaceId !== context.workspaceId) return [];
+    if (context.parentTabId && tabId && tabId !== context.parentTabId) return [];
+    return [{
+      paneId,
+      workspaceId,
+      ...(tabId ? { tabId } : {}),
+      ...(getString(value, "cwd") ? { cwd: getString(value, "cwd") } : {}),
+      ...(getString(value, "foreground_cwd", "foregroundCwd")
+        ? { foregroundCwd: getString(value, "foreground_cwd", "foregroundCwd") }
+        : {}),
+      focused: value.focused === true,
+      ...(getString(value, "agent") ? { agent: getString(value, "agent") } : {}),
+      ...(getString(value, "agent_status", "agentStatus")
+        ? { agentStatus: getString(value, "agent_status", "agentStatus") }
+        : {}),
+      ...(getString(value, "terminal_title", "terminalTitle")
+        ? { terminalTitle: getString(value, "terminal_title", "terminalTitle") }
+        : {}),
+      lastSeen: now,
+    }];
+  });
+}
+
+export function createHerdrLiveRegistry(client: HerdrClient, ttlMs = LIVE_INVENTORY_TTL_MS) {
+  let snapshot: HerdrLiveInventory | undefined;
+  let refreshPromise: Promise<HerdrLiveInventory> | undefined;
+
+  async function refresh(context: HerdrContext, force = false): Promise<HerdrLiveInventory> {
+    if (!force && snapshot && snapshot.workspaceId === context.workspaceId &&
+      snapshot.parentTabId === context.parentTabId && Date.now() - snapshot.refreshedAt < ttlMs) {
+      return snapshot;
+    }
+    if (refreshPromise) return refreshPromise;
+
+    refreshPromise = (async () => {
+      const refreshedAt = Date.now();
+      const value = await client.run(["pane", "list", "--workspace", context.workspaceId]);
+      const next: HerdrLiveInventory = {
+        workspaceId: context.workspaceId,
+        ...(context.parentTabId ? { parentTabId: context.parentTabId } : {}),
+        panes: extractLivePanes(value, context, refreshedAt),
+        refreshedAt,
+      };
+      snapshot = next;
+      return next;
+    })();
+
+    try {
+      return await refreshPromise;
+    } finally {
+      refreshPromise = undefined;
+    }
+  }
+
+  return {
+    refresh,
+    invalidate() {
+      snapshot = undefined;
+    },
+  };
+}
+
+export function formatLiveInventory(inventory: HerdrLiveInventory): string {
+  const scope = inventory.parentTabId
+    ? `workspace ${inventory.workspaceId}, tab ${inventory.parentTabId}`
+    : `workspace ${inventory.workspaceId}`;
+  const lines = [`Herdr pane board (${scope}):`];
+  if (inventory.panes.length === 0) {
+    lines.push("- No panes found.");
+    return lines.join("\n");
+  }
+
+  for (const pane of inventory.panes) {
+    const descriptors = [
+      pane.agent ? `agent ${pane.agent}` : "shell",
+      pane.agentStatus && pane.agentStatus !== "unknown" ? pane.agentStatus : undefined,
+      pane.focused ? "focused" : undefined,
+    ].filter(Boolean).join(", ");
+    lines.push(`- ${pane.paneId} [${descriptors}]`);
+    if (pane.foregroundCwd ?? pane.cwd) lines.push(`  cwd: ${pane.foregroundCwd ?? pane.cwd}`);
+    if (pane.terminalTitle) lines.push(`  title: ${pane.terminalTitle}`);
+  }
+  return lines.join("\n");
 }
 
 function toolResult(text: string, details: Record<string, unknown> = {}) {
@@ -120,6 +235,22 @@ async function writePersistedState(bindings: Map<string, HerdrBinding>): Promise
   await fs.writeFile(STATE_FILE, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 }
 
+async function reconcileBindings(bindings: Map<string, HerdrBinding>, inventory: HerdrLiveInventory): Promise<void> {
+  const livePaneIds = new Set(inventory.panes.map((pane) => pane.paneId));
+  let changed = false;
+
+  for (const [key, binding] of bindings) {
+    const sameWorkspace = binding.workspaceId === inventory.workspaceId;
+    const sameTab = binding.parentTabId === inventory.parentTabId;
+    if (sameWorkspace && sameTab && !livePaneIds.has(binding.paneId)) {
+      bindings.delete(key);
+      changed = true;
+    }
+  }
+
+  if (changed) await writePersistedState(bindings);
+}
+
 async function resolveWorkingDirectory(ctx: ExtensionContext, requestedCwd: string | undefined): Promise<string> {
   const candidate = resolve(ctx.cwd, requestedCwd ?? ".");
   try {
@@ -146,12 +277,15 @@ function extractCurrentContext(value: unknown): HerdrContext | undefined {
 async function getHerdrContext(client: HerdrClient): Promise<HerdrContext> {
   const workspaceId = process.env.HERDR_WORKSPACE_ID;
   const parentTabId = process.env.HERDR_TAB_ID;
-  if (workspaceId) return { workspaceId, parentTabId };
+  if (workspaceId && parentTabId) return { workspaceId, parentTabId };
 
   const current = await client.run(["pane", "current", "--current"], { timeout: 5_000 });
   const context = extractCurrentContext(current);
   if (!context) throw new Error("Could not determine the current Herdr workspace.");
-  return context;
+  return {
+    workspaceId: workspaceId ?? context.workspaceId,
+    parentTabId: parentTabId ?? context.parentTabId,
+  };
 }
 
 function bindingKey(context: HerdrContext, cwd: string): string {
@@ -219,7 +353,12 @@ async function getOrCreatePane(
   const key = bindingKey(context, cwd);
   const existing = bindings.get(key);
   if (existing && await isLivePane(client, existing)) return existing;
-  if (existing) bindings.delete(key);
+  if (existing) {
+    // A pane may have been closed manually. Invalidate only this confirmed-dead
+    // binding, preserving all other persistent cache entries.
+    bindings.delete(key);
+    await writePersistedState(bindings);
+  }
 
   const created = await createPane(client, context, cwd);
   await waitForShellStartup(signal);
@@ -272,6 +411,7 @@ function formatStatus(binding: HerdrBinding, pane: unknown, output: string): str
 async function executeAction(
   client: HerdrClient,
   bindings: Map<string, HerdrBinding>,
+  liveRegistry: ReturnType<typeof createHerdrLiveRegistry>,
   input: HerdrShellInput,
   ctx: ExtensionContext,
   signal?: AbortSignal,
@@ -280,19 +420,39 @@ async function executeAction(
     throw new Error("herdr_shell requires Pi to run inside a Herdr-managed pane (HERDR_ENV=1).");
   }
 
+  const [herdrVersion, context] = await Promise.all([
+    ensureSupportedHerdr(client),
+    getHerdrContext(client),
+  ]);
+
+  if (input.action === "status" && input.cwd === undefined) {
+    const inventory = await liveRegistry.refresh(context, true);
+    await reconcileBindings(bindings, inventory);
+    return toolResult(formatLiveInventory(inventory), {
+      action: input.action,
+      workspaceId: context.workspaceId,
+      parentTabId: context.parentTabId,
+      paneCount: inventory.panes.length,
+      refreshedAt: inventory.refreshedAt,
+      herdrVersion,
+    });
+  }
+
   const cwd = await resolveWorkingDirectory(ctx, input.cwd);
-  const herdrVersion = await ensureSupportedHerdr(client);
-  const context = await getHerdrContext(client);
   const key = bindingKey(context, cwd);
   const existing = bindings.get(key);
 
   if (input.action === "close") {
     if (!existing) return toolResult(`No managed Herdr side-by-side pane exists for ${cwd}.`, { action: input.action, cwd });
     await closeBinding(client, bindings, existing, signal);
-    return toolResult(`Closed managed Herdr pane ${existing.paneId} for ${cwd}.`, {
+    liveRegistry.invalidate();
+    const inventory = await liveRegistry.refresh(context, true);
+    return toolResult(`Closed managed Herdr pane ${existing.paneId} for ${cwd}.\n\n${formatLiveInventory(inventory)}`, {
       action: input.action,
       cwd,
       paneId: existing.paneId,
+      paneCount: inventory.panes.length,
+      herdrVersion,
     });
   }
 
@@ -301,8 +461,17 @@ async function executeAction(
       if (existing) {
         bindings.delete(key);
         await writePersistedState(bindings);
+        liveRegistry.invalidate();
+        const inventory = await liveRegistry.refresh(context, true);
+        return toolResult(`Managed Herdr pane ${existing.paneId} is no longer open, likely because it was closed manually.\n\n${formatLiveInventory(inventory)}`, {
+          action: input.action,
+          cwd,
+          paneId: existing.paneId,
+          paneCount: inventory.panes.length,
+          herdrVersion,
+        });
       }
-      return toolResult(`No live managed Herdr side-by-side pane exists for ${cwd}.`, { action: input.action, cwd });
+      return toolResult(`No live managed Herdr side-by-side pane exists for ${cwd}.`, { action: input.action, cwd, herdrVersion });
     }
 
     if (input.action === "read_output") {
@@ -359,28 +528,35 @@ async function executeAction(
     binding.lastCommand = input.command;
     binding.updatedAt = new Date().toISOString();
     await writePersistedState(bindings);
+    liveRegistry.invalidate();
+    const inventory = await liveRegistry.refresh(context, true);
     return toolResult(
-      `Started command in Herdr side-by-side pane ${binding.paneId} without waiting for it to exit: ${describeCommand(input.command)}\nUse herdr_shell read_output to inspect recent stdout/stderr.`,
+      `Started command in Herdr side-by-side pane ${binding.paneId} without waiting for it to exit: ${describeCommand(input.command)}\nUse herdr_shell read_output to inspect recent stdout/stderr.\n\n${formatLiveInventory(inventory)}`,
       {
         action: input.action,
         cwd,
         paneId: binding.paneId,
         command: describeCommand(input.command),
+        paneCount: inventory.panes.length,
         herdrVersion,
       },
     );
   }
 
-  return toolResult(`Opened interactive shell in Herdr side-by-side pane ${binding.paneId}.`, {
+  liveRegistry.invalidate();
+  const inventory = await liveRegistry.refresh(context, true);
+  return toolResult(`Opened interactive shell in Herdr side-by-side pane ${binding.paneId}.\n\n${formatLiveInventory(inventory)}`, {
     action: input.action,
     cwd,
     paneId: binding.paneId,
+    paneCount: inventory.panes.length,
     herdrVersion,
   });
 }
 
 export default function herdrShellExtension(pi: ExtensionAPI): void {
   const client = createHerdrClient(pi);
+  const liveRegistry = createHerdrLiveRegistry(client);
   let bindingsPromise: Promise<Map<string, HerdrBinding>> | undefined;
   let operation = Promise.resolve();
 
@@ -410,7 +586,7 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
 
     const currentOperation = operation.then(async () => {
       const bindings = await getBindings();
-      return executeAction(client, bindings, {
+      return executeAction(client, bindings, liveRegistry, {
         action: "open",
         command: request.command!,
         cwd: request.cwd,
@@ -426,7 +602,7 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "herdr_shell",
     label: "Herdr Shell",
-    description: "Open and control a persistent shell in a right-side Herdr pane in the current tab. Use this for long-running development servers, watchers, logs, and interactive processes; use bash for short commands whose output Pi needs immediately.",
+    description: "Open and control a persistent shell in a right-side Herdr pane in the current tab. Use status without cwd to inspect the live pane board. Use this for long-running development servers, watchers, logs, and interactive processes; use bash for short commands whose output Pi needs immediately.",
     promptSnippet: "Run long-lived commands in a visible right-side Herdr pane and read their recent output",
     promptGuidelines: [
       "Use bash for short-lived commands when Pi needs their stdout/stderr in the current turn.",
@@ -434,13 +610,16 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
       "Use herdr_shell with action read_output to inspect recent output from a managed Herdr pane; do not assume a server started successfully without checking it.",
       "herdr_shell runs asynchronously in a right-side pane and does not wait for a server to exit.",
       "herdr_shell creates one right-side pane in the current Herdr tab and never creates a new tab or workspace.",
+      "Use status without cwd to inspect all live panes in the current Herdr tab.",
+      "Pane state is reconciled against Herdr before operations; if a pane was closed manually, open/run recreates it and read_output/status reports the refreshed pane board.",
+      "If the user closed a pane manually and you need to show something visibly, use open or run to create a fresh pane; do not try to reuse the old pane ID.",
     ],
     parameters: HerdrShellParameters,
     executionMode: "sequential",
     async execute(_toolCallId, input, signal, _onUpdate, ctx) {
       const currentOperation = operation.then(async () => {
         const bindings = await getBindings();
-        return executeAction(client, bindings, input, ctx, signal);
+        return executeAction(client, bindings, liveRegistry, input, ctx, signal);
       });
       operation = currentOperation.then(() => undefined, () => undefined);
       return currentOperation;

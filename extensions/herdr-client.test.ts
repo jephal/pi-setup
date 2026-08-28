@@ -7,6 +7,7 @@ import {
   extractRootPaneId,
   extractTabId,
   HerdrError,
+  isNotFound,
   parseVersion,
   supportsTabShell,
 } from "./herdr-client.ts";
@@ -45,6 +46,12 @@ test("parses JSON commands and preserves plain-text pane output", async () => {
   assert.deepEqual(await client.run(["tab", "get", "w1:t2"]), { ok: true });
   assert.equal(await client.runText(["pane", "read", "w1:p2"]), "line one\nline two");
   assert.deepEqual(calls, [["tab", "get", "w1:t2"], ["pane", "read", "w1:p2"]]);
+});
+
+test("recognizes Herdr pane-not-found errors for stale pane recovery", () => {
+  assert.equal(isNotFound(new HerdrError("pane is gone", "pane_not_found")), true);
+  assert.equal(isNotFound(new HerdrError("tab is gone", "TAB_GONE")), true);
+  assert.equal(isNotFound(new HerdrError("validation failed", "VALIDATION_ERROR")), false);
 });
 
 test("normalizes Herdr CLI errors", async () => {
