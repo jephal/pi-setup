@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { lstat, unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NotesVault, MAX_NOTE_BYTES, type NotesWriteMode } from "../src/notes/vault.ts";
+import { NotesVault, MAX_NOTE_BYTES, type NotesSearchMode, type NotesTransferAction, type NotesWriteMode } from "../src/notes/vault.ts";
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_LIST_LIMIT = 500;
@@ -16,9 +16,14 @@ const listNotesParameters = Type.Object({
 });
 
 const searchParameters = Type.Object({
-	query: Type.String({ description: "Text to find in note content or filenames" }),
+	query: Type.String({ description: "Literal text or regular expression to find" }),
 	path: Type.Optional(Type.String({ description: "Folder inside the notes directory to search (default: root)" })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Maximum number of matching notes (default: 20)" })),
+	mode: Type.Optional(StringEnum(["literal", "regex", "filename"] as const, { description: "Search mode: literal (default), regex, or filename-only" })),
+	glob: Type.Optional(Type.String({ description: "Optional glob relative to path, supporting * and **, such as *.md or **/*.md" })),
+	caseSensitive: Type.Optional(Type.Boolean({ description: "Use case-sensitive matching (default: false)" })),
+	contextLines: Type.Optional(Type.Integer({ minimum: 0, maximum: 5, description: "Additional lines before and after the first match (default: 0)" })),
+	pathsOnly: Type.Optional(Type.Boolean({ description: "Return matching paths without snippets for minimal output" })),
 });
 
 const openViewerParameters = Type.Object({
@@ -42,6 +47,12 @@ const writeNoteParameters = Type.Object({
 	path: Type.String({ description: "Markdown note path relative to the notes directory" }),
 	content: Type.String({ description: "Complete note content, or content to append" }),
 	mode: StringEnum(["create", "overwrite", "append"] as const, { description: "create, overwrite, or append to a Markdown note" }),
+});
+
+const transferNoteParameters = Type.Object({
+	action: StringEnum(["copy", "move"] as const, { description: "Copy or move the note without sending its content through the model" }),
+	source: Type.String({ description: "Existing Markdown note path relative to the notes directory" }),
+	destination: Type.String({ description: "New Markdown note path relative to the notes directory" }),
 });
 
 function configuredNotes(): NotesVault {
@@ -182,13 +193,24 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "notes_search",
 		label: "Search Notes",
-		description: "Search note content and filenames in the configured local notes directory. Returns the first matching line for each note, with bounded results.",
-		promptSnippet: "Search note content and filenames",
-		promptGuidelines: ["Use notes_search before reading notes when you need to locate information by topic or phrase.", "Use notes_read after notes_search when the matching note needs fuller context."],
+		description: "Run a bounded grep-like search in visible Markdown notes. Literal mode (default) searches content and filenames; regex searches content line-by-line with a timeout; filename mode searches paths only. Supports path-relative globs, case sensitivity, context lines, and path-only output.",
+		promptSnippet: "Search note content and filenames with bounded grep-like options",
+		promptGuidelines: ["Use notes_search before reading notes when you need to locate information by topic or phrase.", "Use mode regex for patterns, filename for path-only discovery, and glob/path to narrow the search.", "Use pathsOnly when you only need matching paths; use contextLines sparingly to keep output small.", "Use notes_read after notes_search when a matching note needs fuller context."],
 		parameters: searchParameters,
-		async execute(_toolCallId, params) {
-			const matches = await configuredNotes().search(params.query, params.path ?? ".", params.limit ?? 20);
-			const text = matches.length ? matches.map((match) => `${match.path}${match.line ? `:${match.line}` : ""}\n${match.snippet}`).join("\n\n") : `No notes matched: ${params.query}`;
+		async execute(_toolCallId, params, signal) {
+			const matches = await configuredNotes().search(params.query, params.path ?? ".", params.limit ?? 20, {
+				mode: params.mode as NotesSearchMode | undefined,
+				glob: params.glob,
+				caseSensitive: params.caseSensitive,
+				contextLines: params.contextLines,
+				pathsOnly: params.pathsOnly,
+				signal,
+			});
+			const text = matches.length
+				? params.pathsOnly
+					? matches.map((match) => match.path).join("\n")
+					: matches.map((match) => `${match.path}${match.line ? `:${match.line}` : ""}${match.snippet ? `\n${match.snippet}` : ""}`).join("\n\n")
+				: `No notes matched: ${params.query}`;
 			const output = truncateUtf8(text);
 			return textResult(output.text, { query: params.query, matches, truncated: output.truncated });
 		},
@@ -212,12 +234,26 @@ export default function notesExtension(pi: ExtensionAPI): void {
 		label: "Write Note",
 		description: `Create, overwrite, or append to a Markdown note in the configured local notes directory. Writes are path-confined and limited to ${MAX_NOTE_BYTES} bytes. Use create for new notes and choose overwrite or append explicitly for existing notes.`,
 		promptSnippet: "Create or update a Markdown note",
-		promptGuidelines: ["Use notes_write only when the user asks to create or update a note.", "Choose notes_write mode explicitly: create refuses existing notes, overwrite replaces them, and append preserves existing content.", "Never put secrets, credentials, or private keys into notes_write unless the user explicitly requests that exact content."],
+		promptGuidelines: ["Use notes_write only when the user asks to create or update note content.", "Use notes_transfer for copy/move operations so unchanged content is not sent through the model.", "Choose notes_write mode explicitly: create refuses existing notes, overwrite replaces them, and append preserves existing content.", "Never put secrets, credentials, or private keys into notes_write unless the user explicitly requests that exact content."],
 		parameters: writeNoteParameters,
 		async execute(_toolCallId, params) {
 			const result = await configuredNotes().writeNote(params.path, params.content, params.mode as NotesWriteMode);
 			const verb = result.mode === "create" ? "Created" : result.mode === "overwrite" ? "Overwrote" : "Appended to";
 			return textResult(`${verb} ${result.path} (${result.bytes} bytes).`, { result });
+		},
+	});
+
+	pi.registerTool({
+		name: "notes_transfer",
+		label: "Move or Copy Note",
+		description: "Copy or move an existing Markdown note by path inside the configured notes directory. This performs a local filesystem operation without reading or rewriting note content; destination files are never overwritten.",
+		promptSnippet: "Move or copy a Markdown note without transferring its content",
+		promptGuidelines: ["Use notes_transfer for relocations or duplicates so note content does not spend model tokens.", "Use action move to rename/relocate and copy to duplicate; source and destination must be Markdown paths.", "The operation creates missing destination folders and refuses existing destinations; use notes_write only for semantic content changes."],
+		parameters: transferNoteParameters,
+		async execute(_toolCallId, params) {
+			const result = await configuredNotes().transferNote(params.source, params.destination, params.action as NotesTransferAction);
+			const verb = result.action === "copy" ? "Copied" : "Moved";
+			return textResult(`${verb} ${result.source} to ${result.destination} (${result.bytes} bytes).`, { result });
 		},
 	});
 

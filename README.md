@@ -51,7 +51,8 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Core-memory injection and bounded automatic recall with stale filtering
   - `/memory-capture`, `/memory-recall`, and `/memory-stale` controls for recall and guidance
 - Local notes integration
-  - Agent-first filesystem tools for listing, searching, reading, and writing Markdown notes
+  - Agent-first filesystem tools for listing, searching, reading, writing, copying, and moving Markdown notes
+  - Path-only copy/move operations keep unchanged note content out of the model context
   - Directory-scoped path protection with hidden metadata directories excluded from discovery
   - No desktop application, HTTP server, or API key required
 - Agent-first scheduled tasks
@@ -120,14 +121,17 @@ export NOTES_PATH="$HOME/notes"
 The package registers these agent tools:
 
 - `notes_list` — discover Markdown notes, optionally under a folder.
-- `notes_search` — search note content and filenames.
+- `notes_search` — bounded grep-like search for note content or filenames, with literal/regex, glob, case, context, and path-only options.
 - `notes_read` — read one Markdown note.
 - `notes_write` — explicitly create, overwrite, or append to a note.
+- `notes_transfer` — copy or move a Markdown note by path without reading or rewriting its content; destination files are never overwritten.
 - `notes_open_viewer` — open Neovim with the notes directory in a Herdr side pane when available.
 - `notes_open_note` — open a validated note in the running Neovim instance.
 - `notes_refresh` — ask Neovim to detect files changed by Pi or another process.
 - `notes_save` — explicitly save the current Neovim buffer.
 - `notes_git` — explicitly run local Git status, diff, or commit against the notes repository.
+
+`notes_search` is the preferred discovery interface instead of raw shell commands: it keeps searches inside the configured vault and returns bounded structured matches. Literal, case-insensitive search of content and filenames is the default. Use `mode: "regex"` for content patterns, `mode: "filename"` for path-only discovery, `glob` (relative to the selected `path`) and `path` to narrow scope, `contextLines` for a small surrounding window, and `pathsOnly: true` for minimal-token results. Regex searches run in an isolated worker with bounded per-line input and a timeout. Use `notes_read` only after locating the notes that need full context.
 
 The visual interface is Neovim with a small checked-in configuration at `src/notes/nvim-init.lua`. It uses Neovim’s built-in folder explorer and syntax highlighting, has no plugins, and exposes a `:NotesHelp` command plus discoverable shortcuts. Start it directly in the VM with:
 
@@ -137,7 +141,7 @@ nvim --clean -u src/notes/nvim-init.lua "$NOTES_PATH"
 
 When Pi runs inside Herdr, use `/notes-open` or ask the agent to use `notes_open_viewer`. Neovim is launched in the managed right-side pane used by `herdr_shell`; if Herdr is unavailable, the command is returned for a normal VM terminal instead. Pi can open validated notes, refresh changed buffers, and explicitly save through a private local Neovim socket. It cannot execute arbitrary Neovim commands.
 
-All paths are relative to the configured notes directory. Traversal is rejected, writes cannot leave the directory, hidden directories are excluded from discovery, and note reads/writes are bounded to 5 MiB. Tool output is bounded to keep large directories from overwhelming the model context. Use `/notes` to show the resolved notes directory in interactive Pi. Git operations are explicit and local-only; no remote is configured.
+All paths are relative to the configured notes directory. Traversal is rejected, writes and transfers cannot leave the directory, hidden directories are excluded from discovery, and note reads/writes/transfers are bounded to 5 MiB. Use `notes_transfer` with `action: "move"` or `action: "copy"` when relocating or duplicating an existing note: only the source and destination paths cross the model boundary, so unchanged content does not consume context tokens. Destination files are refused rather than overwritten. Transfers preserve note bytes exactly, including any filename-derived frontmatter title; if a rename should also change metadata, use `notes_read` and `notes_write` afterward. Tool output is bounded to keep large directories from overwhelming the model context. Use `/notes` to show the resolved notes directory in interactive Pi. Git operations are explicit and local-only; no remote is configured.
 
 Every note uses a small YAML frontmatter header so agents and tools can reference it consistently:
 
