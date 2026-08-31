@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { join, resolve } from "node:path";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { formatSize, getAgentDir, truncateTail, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
@@ -20,6 +20,7 @@ import {
 const STATE_VERSION = 2;
 const DEFAULT_OUTPUT_LINES = 80;
 const MAX_OUTPUT_LINES = 500;
+const MAX_OUTPUT_BYTES = 24 * 1024;
 const COMMAND_TIMEOUT_MS = 15_000;
 const SHELL_STARTUP_DELAY_MS = 6_000;
 const STATE_FILE = join(getAgentDir(), "herdr-shell.json");
@@ -89,6 +90,30 @@ function toolResult(text: string, details: Record<string, unknown> = {}) {
   return {
     content: [{ type: "text" as const, text }],
     details,
+  };
+}
+
+export function truncateHerdrOutput(output: string, maxLines: number) {
+  const sanitized = output
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  const result = truncateTail(sanitized, { maxLines, maxBytes: MAX_OUTPUT_BYTES });
+  const marker = result.truncated
+    ? `\n\n[Recent output truncated by ${result.truncatedBy ?? "limit"}: showing ${result.outputLines}/${result.totalLines} lines and ${formatSize(result.outputBytes)}/${formatSize(result.totalBytes)}. Inspect the Herdr pane for the complete requested window.]`
+    : "";
+  return {
+    text: `${result.content}${marker}`,
+    truncation: {
+      truncated: result.truncated,
+      truncatedBy: result.truncatedBy,
+      totalLines: result.totalLines,
+      totalBytes: result.totalBytes,
+      outputLines: result.outputLines,
+      outputBytes: result.outputBytes,
+      maxLines: result.maxLines,
+      maxBytes: result.maxBytes,
+    },
   };
 }
 
@@ -318,12 +343,14 @@ async function executeAction(
         "--lines",
         String(lines),
       ], { timeout: COMMAND_TIMEOUT_MS });
-      return toolResult(output || "(no recent output)", {
+      const bounded = truncateHerdrOutput(output, lines);
+      return toolResult(bounded.text || "(no recent output)", {
         action: input.action,
         cwd,
         paneId: existing.paneId,
         lines,
         herdrVersion,
+        truncation: bounded.truncation,
       });
     }
 
@@ -339,11 +366,13 @@ async function executeAction(
       "--lines",
       "20",
     ], { timeout: COMMAND_TIMEOUT_MS });
-    return toolResult(formatStatus(existing, pane, output), {
+    const bounded = truncateHerdrOutput(output, 20);
+    return toolResult(formatStatus(existing, pane, bounded.text), {
       action: input.action,
       cwd,
       paneId: existing.paneId,
       herdrVersion,
+      truncation: bounded.truncation,
     });
   }
 
@@ -426,14 +455,11 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "herdr_shell",
     label: "Herdr Shell",
-    description: "Open and control a persistent shell in a right-side Herdr pane in the current tab. Use this for long-running development servers, watchers, logs, and interactive processes; use bash for short commands whose output Pi needs immediately.",
-    promptSnippet: "Run long-lived commands in a visible right-side Herdr pane and read their recent output",
+    description: "Control one persistent shell in the current tab's right-side Herdr pane. Use it for servers, watchers, logs, or interactive processes; use bash when Pi needs output this turn.",
+    promptSnippet: "Run long-lived work in a Herdr side pane",
     promptGuidelines: [
-      "Use bash for short-lived commands when Pi needs their stdout/stderr in the current turn.",
-      "Use herdr_shell with action open or run for development servers, watchers, log tails, and other long-running processes.",
-      "Use herdr_shell with action read_output to inspect recent output from a managed Herdr pane; do not assume a server started successfully without checking it.",
-      "herdr_shell runs asynchronously in a right-side pane and does not wait for a server to exit.",
-      "herdr_shell creates one right-side pane in the current Herdr tab and never creates a new tab or workspace.",
+      "Use open or run for long-lived work, then read_output to verify it started.",
+      "It runs asynchronously and reuses one pane in the current Herdr tab.",
     ],
     parameters: HerdrShellParameters,
     executionMode: "sequential",
@@ -449,8 +475,9 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
       const command = args.command ? ` · ${describeCommand(args.command)}` : "";
       return new Text(theme.fg("toolTitle", `Herdr shell · ${args.action}`) + theme.fg("muted", command), 0, 0);
     },
-    renderResult(result, _options, theme, context) {
+    renderResult(result, { expanded }, theme, context) {
       const text = result.content.find((part) => part.type === "text")?.text ?? "Herdr shell completed.";
+      if (expanded) return new Text(theme.fg(context.isError ? "error" : "toolOutput", text), 0, 0);
       const firstLine = text.split(/\r?\n/, 1)[0] ?? text;
       return new Text(theme.fg(context.isError ? "error" : "toolOutput", firstLine), 0, 0);
     },

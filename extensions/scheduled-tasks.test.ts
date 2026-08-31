@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nextCronOccurrence } from "../src/scheduled-tasks/cron.ts";
 import { ScheduledTaskManager, type SchedulerClock } from "../src/scheduled-tasks/manager.ts";
 import { ScheduledTaskStore } from "../src/scheduled-tasks/store.ts";
 import type { ScheduledTask } from "../src/scheduled-tasks/types.ts";
+import scheduledTasksExtension, { activateScheduledTaskTools, deactivateScheduledTaskTools } from "./scheduled-tasks.ts";
 
 type MemoryPersistence = {
   rows: Map<string, ScheduledTask>;
@@ -38,6 +39,59 @@ function fakeClock(initial: number): SchedulerClock & { advance: (value: number)
     clearTimeout: (timer) => clearTimeout(timer),
   };
 }
+
+test("package loads optional tool-group resetters before approval policy snapshots", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { pi: { extensions: string[] } };
+  const approvalIndex = manifest.pi.extensions.indexOf("extensions/approval-modes.ts");
+  assert.ok(manifest.pi.extensions.indexOf("extensions/scheduled-tasks.ts") < approvalIndex);
+  assert.ok(manifest.pi.extensions.indexOf("extensions/notes.ts") < approvalIndex);
+});
+
+test("scheduler loader keeps operations optional and avoids repeated active-tools churn", () => {
+  const definitions: Array<{ name: string; description: string; promptSnippet?: string; promptGuidelines?: string[] }> = [];
+  let activeTools = ["read", "scheduled_task_tools"];
+  let setCalls = 0;
+  scheduledTasksExtension({
+    on() {},
+    registerCommand() {},
+    registerTool(definition: { name: string; description: string; promptSnippet?: string; promptGuidelines?: string[] }) { definitions.push(definition); },
+    getActiveTools: () => activeTools,
+    setActiveTools(next: string[]) { setCalls++; activeTools = next; },
+  } as any);
+
+  const loader = definitions.find((definition) => definition.name === "scheduled_task_tools");
+  const create = definitions.find((definition) => definition.name === "scheduled_task_create");
+  assert.ok(loader);
+  assert.ok(create);
+  assert.match(loader.description, /only when the user asks/);
+  assert.match(loader.promptGuidelines!.join("\n"), /five-field cron/);
+  assert.match(create.description, /never send the user to a scheduler command/);
+  assert.equal(create.promptSnippet, undefined);
+
+  let staleTools = [...activeTools, "scheduled_task_create", "scheduled_task_list", "scheduled_task_delete", "scheduled_task_run_now"];
+  let resetCalls = 0;
+  deactivateScheduledTaskTools({
+    getActiveTools: () => staleTools,
+    setActiveTools(next) { resetCalls++; staleTools = next; },
+  } as any);
+  assert.deepEqual(staleTools, ["read", "scheduled_task_tools"]);
+  deactivateScheduledTaskTools({
+    getActiveTools: () => staleTools,
+    setActiveTools(next) { resetCalls++; staleTools = next; },
+  } as any);
+  assert.equal(resetCalls, 1);
+
+  assert.deepEqual(activateScheduledTaskTools({
+    getActiveTools: () => activeTools,
+    setActiveTools(next) { setCalls++; activeTools = next; },
+  } as any), ["scheduled_task_create", "scheduled_task_list", "scheduled_task_delete", "scheduled_task_run_now"]);
+  assert.equal(setCalls, 1);
+  assert.deepEqual(activateScheduledTaskTools({
+    getActiveTools: () => activeTools,
+    setActiveTools(next) { setCalls++; activeTools = next; },
+  } as any), []);
+  assert.equal(setCalls, 1);
+});
 
 test("computes recurring cron occurrences in an explicit timezone", () => {
   const after = new Date("2026-08-26T06:01:00.000Z");

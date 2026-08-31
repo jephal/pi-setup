@@ -172,6 +172,8 @@ Run the local test suite with:
 npm test
 ```
 
+The package intentionally has no standalone TypeScript project configuration: Pi supplies the extension peer dependencies and loads TypeScript directly. The test suite runs the extension test files with Node's TypeScript stripping, and focused `node --experimental-strip-types --check` commands are used for edited entrypoints instead of adding a loader-specific typecheck configuration.
+
 ## Subagents
 
 The setup includes Pi's first-party subagent workflow with bundled defaults. The

@@ -1,7 +1,19 @@
 import type { MemoryRecord, MemorySearchResult } from "./types.js";
 
-function terms(value: string): string[] {
+export function memoryTerms(value: string): string[] {
 	return [...new Set(value.toLowerCase().match(/[a-z0-9][a-z0-9_-]*/g) ?? [])];
+}
+
+/**
+ * Automatic recall should require more than one incidental word match from a
+ * long task prompt. Explicit searches remain intentionally broader.
+ */
+export function isMeaningfullyRelevant(record: MemoryRecord, query: string): boolean {
+	const queryTerms = memoryTerms(query);
+	if (queryTerms.length < 2) return false;
+	const recordTerms = new Set([...memoryTerms(record.content), ...record.tags.flatMap(memoryTerms)]);
+	const matches = queryTerms.filter((term) => recordTerms.has(term)).length;
+	return matches >= 2 || record.content.toLowerCase().includes(query.trim().toLowerCase());
 }
 
 export function memoryAgeDays(record: MemoryRecord, now = Date.now()): number {
@@ -37,8 +49,8 @@ function scoreRecord(record: MemoryRecord, queryTerms: string[], query: string, 
 		return record.importance * 0.6 + Math.min(1, record.confirmationCount / 5) * 0.3 + recencyScore(record, now) * 0.1;
 	}
 
-	const contentTerms = new Set(terms(record.content));
-	const tagTerms = new Set(record.tags.flatMap(terms));
+	const contentTerms = new Set(memoryTerms(record.content));
+	const tagTerms = new Set(record.tags.flatMap(memoryTerms));
 	const matchedContent = queryTerms.filter((term) => contentTerms.has(term)).length;
 	const matchedTags = queryTerms.filter((term) => tagTerms.has(term)).length;
 	const overlap = matchedContent / queryTerms.length;
@@ -60,7 +72,7 @@ function scoreRecord(record: MemoryRecord, queryTerms: string[], query: string, 
 }
 
 export function rankMemories(records: MemoryRecord[], query: string): MemorySearchResult[] {
-	const queryTerms = terms(query);
+	const queryTerms = memoryTerms(query);
 	const now = Date.now();
 	return records
 		.map((record) => ({ ...record, score: scoreRecord(record, queryTerms, query, now) }))
