@@ -17,13 +17,13 @@ const OPTIONAL_ADMIN_TOOLS = {
 } as const;
 
 const listNotesParameters = Type.Object({
-	path: Type.Optional(Type.String({ description: "Folder inside the notes directory to list (default: root)" })),
+	path: Type.Optional(Type.String({ description: "Optional folder relative to the configured notes vault, not the current project. Omit this or use '.' to list the whole vault; an empty value is treated as the vault root." })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIST_LIMIT, description: "Maximum number of notes to return (default: 100)" })),
 });
 
 const searchParameters = Type.Object({
 	query: Type.String({ description: "Literal text or regular expression to find" }),
-	path: Type.Optional(Type.String({ description: "Folder inside the notes directory to search (default: root)" })),
+	path: Type.Optional(Type.String({ description: "Optional folder relative to the configured notes vault, not the current project. Omit this or use '.' to search the whole vault; an empty value is treated as the vault root." })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Maximum number of matching notes (default: 20)" })),
 	mode: Type.Optional(StringEnum(["literal", "regex", "filename"] as const, { description: "Search mode: literal (default), regex, or filename-only" })),
 	glob: Type.Optional(Type.String({ description: "Optional glob relative to path, supporting * and **, such as *.md or **/*.md" })),
@@ -206,12 +206,12 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "notes_list",
 		label: "List Notes",
-		description: "List visible Markdown notes in the configured local directory; hidden folders are excluded.",
-		promptSnippet: "List Markdown notes in the configured directory",
-		promptGuidelines: ["List notes before guessing a path."],
+		description: "List visible Markdown notes in the configured NOTES_PATH vault; this is independent of the current project directory and hidden folders are excluded.",
+		promptSnippet: "List Markdown notes in the configured notes vault",
+		promptGuidelines: ["List notes before guessing a note path.", "The notes vault is configured by NOTES_PATH and is separate from the current project; omit path or use '.' for its root, never pass the project directory."],
 		parameters: listNotesParameters,
 		async execute(_toolCallId, params) {
-			const notes = await configuredNotes().listNotes(params.path ?? ".", params.limit ?? 100);
+			const notes = await configuredNotes().listNotes(params.path?.trim() || ".", params.limit ?? 100);
 			const text = notes.length ? notes.map((note) => `${note.path} (${note.bytes} bytes, modified ${note.modifiedAt})`).join("\n") : "No Markdown notes found.";
 			const output = truncateUtf8(text);
 			return textResult(output.text, { notes, truncated: output.truncated });
@@ -221,12 +221,12 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "notes_search",
 		label: "Search Notes",
-		description: "Bounded grep-like search over visible notes: literal searches content and names, regex is line-based and timed, filename searches paths only.",
-		promptSnippet: "Search note content and filenames",
-		promptGuidelines: ["Search before reading; use pathsOnly for discovery and notes_read for full context."],
+		description: "Bounded grep-like search over the configured NOTES_PATH vault, independent of the current project: literal searches content and names, regex is line-based and timed, filename searches paths only.",
+		promptSnippet: "Search the configured notes vault",
+		promptGuidelines: ["Search before reading; use pathsOnly for discovery and notes_read for full context.", "The notes vault is configured by NOTES_PATH and is separate from the current project; omit path or use '.' for its root, never pass the project directory."],
 		parameters: searchParameters,
 		async execute(_toolCallId, params, signal) {
-			const matches = await configuredNotes().search(params.query, params.path ?? ".", params.limit ?? 20, {
+			const matches = await configuredNotes().search(params.query, params.path?.trim() || ".", params.limit ?? 20, {
 				mode: params.mode as NotesSearchMode | undefined,
 				glob: params.glob,
 				caseSensitive: params.caseSensitive,

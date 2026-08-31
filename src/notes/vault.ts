@@ -266,7 +266,9 @@ export class NotesVault {
 	}
 
 	private async resolveDirectory(root: string, requestedPath: string): Promise<string> {
-		const relativePath = normalizeRelativePath(requestedPath, true);
+		// Directory tools treat an omitted/blank scope as the configured vault root.
+		// File operations still reject blank paths through normalizeRelativePath.
+		const relativePath = normalizeRelativePath(requestedPath.trim() || ".", true);
 		const candidate = join(root, ...relativePath.split("/"));
 		const resolved = await realpath(candidate).catch(() => {
 			throw new Error(`Notes directory is unavailable: ${requestedPath}`);
