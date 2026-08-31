@@ -69,6 +69,29 @@ test("returns a direct VM command when Herdr is unavailable", async () => {
 	}
 });
 
+test("directory tools treat blank paths as the configured vault root", async () => {
+	const root = await makeVault();
+	const previousVault = process.env.NOTES_PATH;
+	try {
+		process.env.NOTES_PATH = root;
+		const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+		const fakePi = {
+			registerTool(definition: { name: string; execute: (...args: any[]) => Promise<any> }) { definitions.push(definition); },
+			registerCommand() {},
+			on() {},
+		};
+		notesExtension(fakePi as unknown as ExtensionAPI);
+		const list = definitions.find((definition) => definition.name === "notes_list")!;
+		const search = definitions.find((definition) => definition.name === "notes_search")!;
+		assert.match((await list.execute("test", { path: "" })).content[0].text, /Projects\/Pi\.md/);
+		assert.match((await search.execute("test", { query: "agent-first", path: "" })).content[0].text, /Projects\/Pi\.md/);
+	} finally {
+		if (previousVault === undefined) delete process.env.NOTES_PATH;
+		else process.env.NOTES_PATH = previousVault;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("activates optional Notes administration tools only when requested", async () => {
 	const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any>; description?: string; promptGuidelines?: string[] }> = [];
 	let activeTools = ["notes_list", "notes_search", "notes_admin_tools"];
@@ -82,6 +105,9 @@ test("activates optional Notes administration tools only when requested", async 
 	notesExtension(fakePi as unknown as ExtensionAPI);
 	const search = definitions.find((definition) => definition.name === "notes_search")!;
 	const loader = definitions.find((definition) => definition.name === "notes_admin_tools")!;
+	assert.match(search.description!, /configured NOTES_PATH vault/);
+	assert.match(search.promptGuidelines!.join("\n"), /separate from the current project/);
+	assert.match(search.promptGuidelines!.join("\n"), /omit path or use '\.'/);
 	assert.match(search.description!, /Bounded grep-like search/);
 	assert.match(search.promptGuidelines!.join("\n"), /Search before reading/);
 	assert.match(loader.promptGuidelines!.join("\n"), /Select open_note only/);
@@ -112,8 +138,11 @@ test("preserves existing metadata while refreshing updated date", () => {
 test("lists Markdown notes while excluding hidden directories", async () => {
 	const root = await makeVault();
 	try {
-		const notes = await new NotesVault(root).listNotes();
-		assert.deepEqual(notes.map((note) => note.path), ["Projects/Pi.md", "Welcome.md"]);
+		const vault = new NotesVault(root);
+		const expected = ["Projects/Pi.md", "Welcome.md"];
+		assert.deepEqual((await vault.listNotes()).map((note) => note.path), expected);
+		assert.deepEqual((await vault.listNotes("")).map((note) => note.path), expected);
+		assert.deepEqual((await vault.listNotes("   ")).map((note) => note.path), expected);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -125,6 +154,8 @@ test("searches note content and filenames", async () => {
 		const vault = new NotesVault(root);
 		const contentMatches = await vault.search("agent-first");
 		assert.deepEqual(contentMatches.map((match) => [match.path, match.line]), [["Projects/Pi.md", 2]]);
+		const blankPathMatches = await vault.search("agent-first", "");
+		assert.deepEqual(blankPathMatches.map((match) => [match.path, match.line]), [["Projects/Pi.md", 2]]);
 
 		const filenameMatches = await vault.search("welcome");
 		assert.deepEqual(filenameMatches, [{ path: "Welcome.md", snippet: "# Welcome", line: 1 }]);
