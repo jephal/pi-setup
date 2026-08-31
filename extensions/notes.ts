@@ -9,6 +9,12 @@ import { NotesVault, MAX_NOTE_BYTES, type NotesSearchMode, type NotesTransferAct
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_LIST_LIMIT = 500;
+const OPTIONAL_ADMIN_TOOLS = {
+	open_note: "notes_open_note",
+	refresh: "notes_refresh",
+	save: "notes_save",
+	git: "notes_git",
+} as const;
 
 const listNotesParameters = Type.Object({
 	path: Type.Optional(Type.String({ description: "Folder inside the notes directory to list (default: root)" })),
@@ -32,6 +38,12 @@ const openViewerParameters = Type.Object({
 
 const openNoteParameters = Type.Object({
 	path: Type.String({ description: "Markdown note path relative to the notes directory" }),
+});
+
+const notesAdminParameters = Type.Object({
+	action: StringEnum(["open_note", "refresh", "save", "git"] as const, {
+		description: "Optional Notes administration capability to activate",
+	}),
 });
 
 const gitParameters = Type.Object({
@@ -174,13 +186,29 @@ function truncateUtf8(text: string, maxBytes = MAX_OUTPUT_BYTES): { text: string
 	return { text: `${result}${suffix}`, truncated: true };
 }
 
+function activateOptionalNotesTool(pi: ExtensionAPI, action: keyof typeof OPTIONAL_ADMIN_TOOLS): string {
+	const toolName = OPTIONAL_ADMIN_TOOLS[action];
+	const activeTools = pi.getActiveTools();
+	if (!activeTools.includes(toolName)) pi.setActiveTools([...activeTools, toolName]);
+	return toolName;
+}
+
 export default function notesExtension(pi: ExtensionAPI): void {
+	// Keep administration-only tools out of the default prompt. This is applied
+	// once per session; the small loader only adds a requested capability.
+	pi.on("session_start", () => {
+		const optional = new Set(Object.values(OPTIONAL_ADMIN_TOOLS));
+		const activeTools = pi.getActiveTools();
+		const reduced = activeTools.filter((name) => !optional.has(name));
+		if (reduced.length !== activeTools.length) pi.setActiveTools(reduced);
+	});
+
 	pi.registerTool({
 		name: "notes_list",
 		label: "List Notes",
-		description: "List Markdown notes in the configured local notes directory. Hidden directories are excluded. The directory is configured with NOTES_PATH.",
-		promptSnippet: "List Markdown notes in the configured notes directory",
-		promptGuidelines: ["Use notes_list to discover notes instead of guessing note paths.", "Notes tools only access the directory configured by NOTES_PATH."],
+		description: "List visible Markdown notes in the configured local directory; hidden folders are excluded.",
+		promptSnippet: "List Markdown notes in the configured directory",
+		promptGuidelines: ["List notes before guessing a path."],
 		parameters: listNotesParameters,
 		async execute(_toolCallId, params) {
 			const notes = await configuredNotes().listNotes(params.path ?? ".", params.limit ?? 100);
@@ -193,9 +221,9 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "notes_search",
 		label: "Search Notes",
-		description: "Run a bounded grep-like search in visible Markdown notes. Literal mode (default) searches content and filenames; regex searches content line-by-line with a timeout; filename mode searches paths only. Supports path-relative globs, case sensitivity, context lines, and path-only output.",
-		promptSnippet: "Search note content and filenames with bounded grep-like options",
-		promptGuidelines: ["Use notes_search before reading notes when you need to locate information by topic or phrase.", "Use mode regex for patterns, filename for path-only discovery, and glob/path to narrow the search.", "Use pathsOnly when you only need matching paths; use contextLines sparingly to keep output small.", "Use notes_read after notes_search when a matching note needs fuller context."],
+		description: "Bounded grep-like search over visible notes: literal searches content and names, regex is line-based and timed, filename searches paths only.",
+		promptSnippet: "Search note content and filenames",
+		promptGuidelines: ["Search before reading; use pathsOnly for discovery and notes_read for full context."],
 		parameters: searchParameters,
 		async execute(_toolCallId, params, signal) {
 			const matches = await configuredNotes().search(params.query, params.path ?? ".", params.limit ?? 20, {
@@ -232,9 +260,9 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "notes_write",
 		label: "Write Note",
-		description: `Create, overwrite, or append to a Markdown note in the configured local notes directory. Writes are path-confined and limited to ${MAX_NOTE_BYTES} bytes. Use create for new notes and choose overwrite or append explicitly for existing notes.`,
+		description: `Create, overwrite, or append a path-confined Markdown note (max ${MAX_NOTE_BYTES} bytes).`,
 		promptSnippet: "Create or update a Markdown note",
-		promptGuidelines: ["Use notes_write only when the user asks to create or update note content.", "Use notes_transfer for copy/move operations so unchanged content is not sent through the model.", "Choose notes_write mode explicitly: create refuses existing notes, overwrite replaces them, and append preserves existing content.", "Never put secrets, credentials, or private keys into notes_write unless the user explicitly requests that exact content."],
+		promptGuidelines: ["Write only user-requested content; use transfer for moves or copies.", "Choose create for new files; overwrite replaces and append preserves existing content.", "Never put secrets, credentials, or private keys into a note unless explicitly requested."],
 		parameters: writeNoteParameters,
 		async execute(_toolCallId, params) {
 			const result = await configuredNotes().writeNote(params.path, params.content, params.mode as NotesWriteMode);
@@ -246,9 +274,9 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "notes_transfer",
 		label: "Move or Copy Note",
-		description: "Copy or move an existing Markdown note by path inside the configured notes directory. This performs a local filesystem operation without reading or rewriting note content; destination files are never overwritten.",
-		promptSnippet: "Move or copy a Markdown note without transferring its content",
-		promptGuidelines: ["Use notes_transfer for relocations or duplicates so note content does not spend model tokens.", "Use action move to rename/relocate and copy to duplicate; source and destination must be Markdown paths.", "The operation creates missing destination folders and refuses existing destinations; use notes_write only for semantic content changes."],
+		description: "Copy or move a Markdown note inside the configured directory without reading its content; destinations are never overwritten.",
+		promptSnippet: "Move or copy a note without transferring its content",
+		promptGuidelines: ["Use for relocations or duplicates; use notes_write only for content changes."],
 		parameters: transferNoteParameters,
 		async execute(_toolCallId, params) {
 			const result = await configuredNotes().transferNote(params.source, params.destination, params.action as NotesTransferAction);
@@ -260,12 +288,30 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "notes_open_viewer",
 		label: "Open Notes in Neovim",
-		description: "Open Neovim with the notes directory in a right-side Herdr pane when available. Otherwise return the command for a normal VM terminal.",
-		promptSnippet: "Open the notes directory in Neovim in a Herdr side pane",
-		promptGuidelines: ["Use notes_open_viewer when the user wants to browse or edit notes interactively alongside Pi.", "notes_open_viewer uses a clean, local Neovim configuration and never exposes notes over a network."],
+		description: "Open the notes directory in a right-side Herdr Neovim pane, or return a local terminal command when Herdr is unavailable.",
+		promptSnippet: "Open notes in a Herdr-side Neovim pane",
+		promptGuidelines: ["Use when the user wants to browse or edit notes alongside Pi."],
 		parameters: openViewerParameters,
 		async execute(_toolCallId, params) {
 			return openViewerInHerdr(pi, params.readOnly === true);
+		},
+	});
+
+	pi.registerTool({
+		name: "notes_admin_tools",
+		label: "Notes: Activate Admin Tool",
+		description: "Activate one optional Notes administration tool when the current task needs it.",
+		promptSnippet: "Activate optional Notes administration tools only when needed",
+		promptGuidelines: [
+			"Select open_note only after notes_open_viewer is running and a specific validated note should be shown.",
+			"Select refresh only to make the running Notes Neovim instance check external file changes.",
+			"Select save only when the user explicitly wants to write the current Neovim buffer.",
+			"Select git only for explicit local notes-repository status, diff, or checkpoint work; it never synchronizes a remote.",
+		],
+		parameters: notesAdminParameters,
+		async execute(_toolCallId, params) {
+			const toolName = activateOptionalNotesTool(pi, params.action as keyof typeof OPTIONAL_ADMIN_TOOLS);
+			return textResult(`Activated ${toolName}.`, { action: params.action, toolName });
 		},
 	});
 

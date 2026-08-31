@@ -8,6 +8,27 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ScheduledTask } from "../src/scheduled-tasks/types.ts";
 
 const databasePath = () => join(getAgentDir(), "scheduled-tasks", "tasks.sqlite");
+const SCHEDULED_TASK_LOADER = "scheduled_task_tools";
+const SCHEDULED_TASK_TOOLS = [
+  "scheduled_task_create",
+  "scheduled_task_list",
+  "scheduled_task_delete",
+  "scheduled_task_run_now",
+] as const;
+
+/** Adds the optional scheduler group without rewriting activeTools when it is already loaded. */
+export function activateScheduledTaskTools(pi: Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">): string[] {
+  const activeTools = pi.getActiveTools();
+  const addedTools = SCHEDULED_TASK_TOOLS.filter((name) => !activeTools.includes(name));
+  if (addedTools.length > 0) pi.setActiveTools([...activeTools, ...addedTools]);
+  return addedTools;
+}
+
+export function deactivateScheduledTaskTools(pi: Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">): void {
+  const activeTools = pi.getActiveTools();
+  const reducedTools = activeTools.filter((name) => !SCHEDULED_TASK_TOOLS.includes(name as typeof SCHEDULED_TASK_TOOLS[number]));
+  if (reducedTools.length !== activeTools.length) pi.setActiveTools(reducedTools);
+}
 
 const createParameters = Type.Object({
   prompt: Type.String({ description: "The prompt to run when the schedule fires." }),
@@ -39,6 +60,7 @@ export default function scheduledTasksExtension(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
 
   pi.on("session_start", async (_event, ctx) => {
+    deactivateScheduledTaskTools(pi);
     await manager?.close();
     context = ctx;
     const store = new ScheduledTaskStore(databasePath(), ctx.sessionManager.getSessionId(), ctx.cwd);
@@ -63,16 +85,29 @@ export default function scheduledTasksExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
+    name: SCHEDULED_TASK_LOADER,
+    label: "Activate Scheduled Tasks",
+    description: "Activate scheduling operations only when the user asks for a reminder, recurring check, or future work.",
+    promptSnippet: "Activate scheduled-task operations when scheduling work is requested",
+    promptGuidelines: [
+      "For recurring schedules, use five-field cron and preserve the requested IANA timezone.",
+      "For one-shot work, use schedule='once' with an ISO runAt timestamp and explicit offset when possible.",
+      "Scheduled prompts inherit this session's model, tools, MCP connections, working directory, and approval mode.",
+    ],
+    parameters: Type.Object({}),
+    async execute() {
+      const addedTools = activateScheduledTaskTools(pi);
+      return {
+        content: [{ type: "text", text: addedTools.length ? `Activated scheduled-task operations: ${addedTools.join(", ")}.` : "Scheduled-task operations are already active." }],
+        details: { addedTools },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "scheduled_task_create",
     label: "Create Scheduled Task",
-    description: "Create a recurring or one-shot prompt that Pi runs automatically. Use this when the user asks to be reminded, to check something later, or to repeat a task. Do not tell the user to edit a file or run a scheduler command.",
-    promptSnippet: "Create an agent-managed recurring or one-shot scheduled prompt",
-    promptGuidelines: [
-      "Use scheduled_task_create when the user asks for a reminder, a periodic check, or work at a future time.",
-      "For recurring tasks, convert the requested local time into a five-field cron expression and pass the requested IANA timezone unchanged.",
-      "For one-shot tasks, use schedule='once' and provide runAt as an ISO timestamp with an explicit offset when possible.",
-      "Scheduled tasks inherit the current Pi session's model, tools, MCP connections, working directory, and approval mode.",
-    ],
+    description: "Create a recurring or one-shot prompt Pi runs automatically; never send the user to a scheduler command.",
     parameters: createParameters,
     async execute(_toolCallId, params) {
       const task = getManager(manager).create(params);
@@ -93,8 +128,7 @@ export default function scheduledTasksExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "scheduled_task_list",
     label: "List Scheduled Tasks",
-    description: "List scheduled prompts for the current Pi session and project.",
-    promptSnippet: "List current scheduled prompts and their next run times",
+    description: "List scheduled prompts for the current session and project.",
     parameters: Type.Object({}),
     async execute() {
       const tasks = getManager(manager).list();
@@ -108,8 +142,7 @@ export default function scheduledTasksExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "scheduled_task_delete",
     label: "Delete Scheduled Task",
-    description: "Cancel a scheduled prompt by ID or unambiguous ID prefix.",
-    promptSnippet: "Cancel a scheduled prompt",
+    description: "Cancel a scheduled prompt by ID or unambiguous prefix.",
     parameters: idParameters,
     async execute(_toolCallId, params) {
       const deleted = getManager(manager).delete(params.taskId);

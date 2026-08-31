@@ -53,8 +53,33 @@ function toRecord(row: Row): MemoryRecord {
 	};
 }
 
-function normalizeTags(tags: string[]): string[] {
+function normalizeTags(tags: unknown): string[] {
+	if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== "string")) {
+		throw new Error("Memory tags must be an array of strings");
+	}
 	return [...new Set(tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
+}
+
+function validateScope(value: unknown): asserts value is MemoryScope {
+	if (value !== "user" && value !== "project") throw new Error("Memory scope must be user or project");
+}
+
+function validateCategory(value: unknown): asserts value is MemoryCategory {
+	if (!(["preference", "fact", "decision", "workflow"] as const).includes(value as MemoryCategory)) {
+		throw new Error("Memory category must be preference, fact, decision, or workflow");
+	}
+}
+
+function validateImportance(value: unknown): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+		throw new Error("Memory importance must be a finite number between 0 and 1");
+	}
+	return value;
+}
+
+function validateContent(value: unknown): string {
+	if (typeof value !== "string" || !value.trim()) throw new Error("Memory content cannot be empty");
+	return value.trim();
 }
 
 export class MemoryStore {
@@ -117,11 +142,15 @@ export class MemoryStore {
 		alwaysInject?: boolean;
 		source?: MemorySource;
 	}): MemoryRecord {
-		const content = input.content.trim();
-		if (!content) throw new Error("Memory content cannot be empty");
+		const content = validateContent(input.content);
+		validateScope(input.scope);
+		validateCategory(input.category);
+		if (input.alwaysInject !== undefined && typeof input.alwaysInject !== "boolean") {
+			throw new Error("Memory alwaysInject must be a boolean");
+		}
 		const now = new Date().toISOString();
 		const tagsJson = JSON.stringify(normalizeTags(input.tags));
-		const importance = Math.max(0, Math.min(1, input.importance));
+		const importance = validateImportance(input.importance);
 		const existing = this.db.prepare(`
 			SELECT * FROM memories
 			WHERE deleted_at IS NULL AND scope = ? AND category = ? AND lower(trim(content)) = lower(?)
@@ -217,24 +246,36 @@ export class MemoryStore {
 	}
 
 	update(id: string, changes: MemoryUpdate): MemoryRecord | undefined {
+		if (!Object.values(changes).some((value) => value !== undefined)) {
+			throw new Error("Memory update requires at least one changed field");
+		}
 		const current = this.get(id);
 		if (!current) return undefined;
 		const next: MemoryRecord = {
 			...current,
 			updatedAt: new Date().toISOString(),
 		};
-		if (changes.content !== undefined) next.content = changes.content;
-		if (changes.scope !== undefined) next.scope = changes.scope;
-		if (changes.category !== undefined) next.category = changes.category;
+		if (changes.content !== undefined) next.content = validateContent(changes.content);
+		if (changes.scope !== undefined) {
+			validateScope(changes.scope);
+			next.scope = changes.scope;
+		}
+		if (changes.category !== undefined) {
+			validateCategory(changes.category);
+			next.category = changes.category;
+		}
 		if (changes.tags !== undefined) next.tags = normalizeTags(changes.tags);
-		if (changes.importance !== undefined) next.importance = changes.importance;
-		if (changes.alwaysInject !== undefined) next.alwaysInject = changes.alwaysInject;
+		if (changes.importance !== undefined) next.importance = validateImportance(changes.importance);
+		if (changes.alwaysInject !== undefined) {
+			if (typeof changes.alwaysInject !== "boolean") throw new Error("Memory alwaysInject must be a boolean");
+			next.alwaysInject = changes.alwaysInject;
+		}
 		this.db.prepare(`
 			UPDATE memories
 			SET content = ?, scope = ?, category = ?, tags_json = ?, importance = ?, always_inject = ?,
 				updated_at = ?, last_used_at = ?, confirmation_count = confirmation_count + 1
 			WHERE id = ? AND deleted_at IS NULL
-		`).run(next.content.trim(), next.scope, next.category, JSON.stringify(next.tags), Math.max(0, Math.min(1, next.importance)), next.alwaysInject ? 1 : 0, next.updatedAt, next.updatedAt, id);
+		`).run(next.content, next.scope, next.category, JSON.stringify(next.tags), next.importance, next.alwaysInject ? 1 : 0, next.updatedAt, next.updatedAt, id);
 		return this.get(id);
 	}
 

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { MemoryStore } from "../src/memory/db.ts";
 import { MemoryOperationQueue } from "../src/memory/operation-queue.ts";
 import { memoryFreshnessWindowDays } from "../src/memory/ranking.ts";
+import { parseMemorySettings } from "./memory.ts";
 
 test("serializes concurrent memory operations and recovers after a failure", async () => {
 	const queue = new MemoryOperationQueue();
@@ -68,6 +69,87 @@ test("recall hook awaits archival search before filtering core memories", async 
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("automatic recall requires meaningful relevance, does not refresh usage, and avoids unchanged repeats", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-memory-auto-recall-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = root;
+	const databasePath = join(root, "memory", "memory.sqlite");
+	const store = new MemoryStore(databasePath);
+	const archived = store.save({
+		content: "Use concise context summaries for repository plans",
+		scope: "user",
+		category: "workflow",
+		tags: ["planning"],
+		importance: 0.8,
+	});
+	store.close();
+
+	try {
+		const handlers = new Map<string, (event: { prompt: string; systemPrompt: string }) => Promise<any>>();
+		const { default: memoryExtension } = await import("./memory.ts");
+		memoryExtension({
+			registerTool() {},
+			registerCommand() {},
+			on(name: string, handler: (event: { prompt: string; systemPrompt: string }) => Promise<any>) {
+				handlers.set(name, handler);
+			},
+		} as any);
+		const beforeStart = handlers.get("before_agent_start")!;
+		const first = await beforeStart({ prompt: "Create concise repository plans", systemPrompt: "base" });
+		const second = await beforeStart({ prompt: "Create concise repository plans", systemPrompt: "base" });
+		assert.match(first.message.content, new RegExp(archived.id));
+		assert.equal(second.message, undefined);
+		assert.ok(handlers.has("session_before_fork"));
+		assert.ok(handlers.has("session_before_switch"));
+		await handlers.get("session_before_fork")!({ prompt: "", systemPrompt: "" });
+		const afterFork = await beforeStart({ prompt: "Create concise repository plans", systemPrompt: "base" });
+		assert.match(afterFork.message.content, new RegExp(archived.id));
+		await handlers.get("session_before_switch")!({ prompt: "", systemPrompt: "" });
+		const afterSwitch = await beforeStart({ prompt: "Create concise repository plans", systemPrompt: "base" });
+		assert.match(afterSwitch.message.content, new RegExp(archived.id));
+		await handlers.get("session_compact")!({ prompt: "", systemPrompt: "" });
+		const afterCompaction = await beforeStart({ prompt: "Create concise repository plans", systemPrompt: "base" });
+		assert.match(afterCompaction.message.content, new RegExp(archived.id));
+
+		const reopened = new MemoryStore(databasePath);
+		const unchanged = reopened.get(archived.id)!;
+		assert.equal(unchanged.retrievalCount, 0);
+		assert.equal(unchanged.lastUsedAt, undefined);
+		reopened.close();
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("memory settings reject invalid numeric and type-coerced values", () => {
+	const settings = parseMemorySettings({
+		coreMemory: "false",
+		coreLimit: Number.NaN,
+		maxRecallChars: Infinity,
+		staleAfterDays: 1.5,
+	});
+	assert.equal(settings.coreMemory, true);
+	assert.equal(settings.coreLimit, 12);
+	assert.equal(settings.maxRecallChars, 8000);
+	assert.equal(settings.staleAfterDays, 7);
+});
+
+test("memory updates reject empty or no-op changes", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-memory-update-validation-"));
+	const store = new MemoryStore(join(root, "memory.sqlite"));
+	try {
+		const record = store.save({ content: "Keep tests focused", scope: "user", category: "workflow", tags: [], importance: 0.7 });
+		assert.throws(() => store.update(record.id, {}), /requires at least one/);
+		assert.throws(() => store.update(record.id, { content: "  " }), /cannot be empty/);
+		assert.throws(() => store.update(record.id, { importance: Number.NaN }), /finite number/);
+	} finally {
+		store.close();
 		await rm(root, { recursive: true, force: true });
 	}
 });

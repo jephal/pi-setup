@@ -24,6 +24,7 @@ const SEARCH_TOOL_NAME = 'datadog_search_tools';
 
 let client: Client | undefined;
 let connectionPromise: Promise<Client> | undefined;
+let discoveryPromise: Promise<number> | undefined;
 let toolsDiscovered = false;
 const registeredToolNames = new Set<string>();
 const remoteTools = new Map<string, McpTool>();
@@ -40,9 +41,11 @@ export default function datadogMcpExtension(pi: ExtensionAPI): void {
   registerMcpForwardingProvider(forwardingProvider);
 
   pi.on('session_start', async (_event, ctx) => {
-    const activeTools = pi.getActiveTools();
-    if (!activeTools.includes(SEARCH_TOOL_NAME)) {
-      pi.setActiveTools([...activeTools, SEARCH_TOOL_NAME]);
+    // A child receives its permitted tools from --tools. Only re-activate the
+    // loader when it is available in this process's filtered tool registry.
+    if (pi.getAllTools().some((tool) => tool.name === SEARCH_TOOL_NAME)) {
+      const activeTools = pi.getActiveTools();
+      if (!activeTools.includes(SEARCH_TOOL_NAME)) pi.setActiveTools([...activeTools, SEARCH_TOOL_NAME]);
     }
     ctx.ui.notify('Datadog MCP ready; use datadog_search_tools when Datadog investigation is needed', 'info');
   });
@@ -74,6 +77,7 @@ export default function datadogMcpExtension(pi: ExtensionAPI): void {
     const connectedClient = client;
     client = undefined;
     connectionPromise = undefined;
+    discoveryPromise = undefined;
     toolsDiscovered = false;
     registeredToolNames.clear();
     remoteTools.clear();
@@ -140,6 +144,17 @@ async function createConnection(ctx: ExtensionContext): Promise<Client> {
   }
 }
 
+/** Keep only remote tools that were explicitly active before discovery. */
+export function keepDiscoveredToolsInactive(
+  activeAfterRegistration: readonly string[],
+  activeBeforeDiscovery: ReadonlySet<string>,
+  discoveredRemoteTools: ReadonlySet<string>,
+): string[] {
+  return activeAfterRegistration.filter(
+    (name) => !discoveredRemoteTools.has(name) || activeBeforeDiscovery.has(name),
+  );
+}
+
 /**
  * Discovers and registers Datadog tools in pi.
  *
@@ -147,17 +162,32 @@ async function createConnection(ctx: ExtensionContext): Promise<Client> {
  * @param pi - The pi extension API.
  * @returns The number of discovered Datadog tools.
  */
-async function discoverTools(mcpClient: Client, pi: ExtensionAPI): Promise<number> {
+export async function discoverTools(mcpClient: Client, pi: ExtensionAPI): Promise<number> {
   if (toolsDiscovered) return remoteTools.size;
+  if (!discoveryPromise) {
+    discoveryPromise = discoverToolsOnce(mcpClient, pi).finally(() => {
+      discoveryPromise = undefined;
+    });
+  }
+  return discoveryPromise;
+}
 
+async function discoverToolsOnce(mcpClient: Client, pi: ExtensionAPI): Promise<number> {
   const result = await mcpClient.listTools();
-  toolsDiscovered = true;
+  const activeBeforeDiscovery = new Set(pi.getActiveTools());
 
   for (const remoteTool of result.tools) {
     const piToolName = toPiToolName(remoteTool.name);
     remoteTools.set(piToolName, remoteTool);
     registerTool(remoteTool, pi);
   }
+
+  // Pi may activate a newly registered tool by default. Discovery must remain
+  // metadata-only until the search loader explicitly selects matching tools.
+  const activeAfterRegistration = pi.getActiveTools();
+  const lazyActiveTools = keepDiscoveredToolsInactive(activeAfterRegistration, activeBeforeDiscovery, new Set(remoteTools.keys()));
+  if (lazyActiveTools.length !== activeAfterRegistration.length) pi.setActiveTools(lazyActiveTools);
+  toolsDiscovered = true;
 
   return result.tools.length;
 }
@@ -171,11 +201,10 @@ function registerSearchTool(pi: ExtensionAPI): void {
   pi.registerTool({
     name: SEARCH_TOOL_NAME,
     label: 'Datadog: Search Tools',
-    description: 'Search the available Datadog MCP tools and activate only the tools needed for the current investigation.',
-    promptSnippet: 'Search and activate Datadog tools only when a Datadog investigation is needed',
+    description: 'Find and activate only the Datadog MCP tools needed for an investigation.',
+    promptSnippet: 'Find Datadog investigation tools on demand',
     promptGuidelines: [
-      'Use datadog_search_tools before using Datadog MCP tools when the required Datadog capability is not already active.',
-      'Prefer datadog_search_tools with a specific capability such as error tracking, logs, traces, or RUM rather than loading every Datadog tool.',
+      'Search with a specific capability, such as error tracking, logs, traces, or RUM, before calling an inactive Datadog tool.',
     ],
     parameters: Type.Object({
       query: Type.String({ description: 'The Datadog capability to find, for example "highest impact error tracking issues".' }),
@@ -224,7 +253,6 @@ function registerTool(remoteTool: McpTool, pi: ExtensionAPI): void {
   const piToolName = toPiToolName(remoteTool.name);
   if (registeredToolNames.has(piToolName)) return;
 
-  registeredToolNames.add(piToolName);
   const parameters = Type.Unsafe<Record<string, unknown>>(remoteTool.inputSchema as TSchema);
 
   pi.registerTool({
@@ -237,6 +265,7 @@ function registerTool(remoteTool: McpTool, pi: ExtensionAPI): void {
       return callDatadogTool(remoteTool, params, ctx, signal);
     },
   });
+  registeredToolNames.add(piToolName);
 }
 
 /**
@@ -317,7 +346,7 @@ async function searchDatadogTools(
     const addedTools = forwarded.matches
       .map((tool) => tool.name)
       .filter((name) => !activeTools.includes(name));
-    pi.setActiveTools([...new Set([...activeTools, ...addedTools])]);
+    if (addedTools.length > 0) pi.setActiveTools([...activeTools, ...addedTools]);
     return {
       content: [{
         type: 'text' as const,
@@ -336,7 +365,7 @@ async function searchDatadogTools(
   const matches = findToolMatches(query, limit);
   const activeTools = pi.getActiveTools();
   const addedTools = matches.filter((name) => !activeTools.includes(name));
-  pi.setActiveTools([...new Set([...activeTools, ...addedTools])]);
+  if (addedTools.length > 0) pi.setActiveTools([...activeTools, ...addedTools]);
 
   return {
     content: [{

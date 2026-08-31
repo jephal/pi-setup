@@ -99,14 +99,12 @@ export default function askQuestions(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "ask_questions",
 		label: "Ask Questions",
-		description:
-			"Ask the user one or more questions when you need a decision or clarification. Provide a few useful options. The UI always includes an Other text-input option. Use this instead of asking questions in normal assistant text when an answer is needed to continue.",
-		promptSnippet: "Ask the user for a decision with options or a short questionnaire",
+		description: "Ask the user for a decision or clarification with concise options. Use this instead of an assistant-text question when an answer is needed to continue.",
+		promptSnippet: "Ask the user a decision question or short questionnaire",
 		promptGuidelines: [
-			"Use ask_questions whenever you need an answer from the user before continuing, rather than asking a question in assistant text.",
-			"Give ask_questions concise, mutually useful options and include enough context in each question for the user to decide.",
-			"ask_questions always adds an Other text-input option; do not add a duplicate free-form option yourself.",
-			"ask_questions options may include a visualization string when an ASCII illustration materially helps; it is shown to the right of the question only when the selected option has one."
+			"Give mutually useful options with enough context for a decision.",
+			"Other is added automatically; do not add another free-form option.",
+			"Add a visualization only when an ASCII illustration materially helps."
 		],
 		parameters: AskQuestionsParams,
 		executionMode: "sequential",

@@ -5,6 +5,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { MemoryStore } from "../src/memory/db.ts";
 import { MemoryOperationQueue } from "../src/memory/operation-queue.ts";
+import { isMeaningfullyRelevant } from "../src/memory/ranking.ts";
 import type { MemoryCategory, MemoryScope, MemorySearchResult } from "../src/memory/types.ts";
 
 const memoryDir = () => join(getAgentDir(), "memory");
@@ -33,19 +34,33 @@ const DEFAULT_SETTINGS: MemorySettings = {
 	staleAfterDays: 180,
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+	return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+/** Parse untrusted settings without allowing NaN or type-coerced values through. */
+export function parseMemorySettings(value: unknown): MemorySettings {
+	const parsed = isRecord(value) ? value : {};
+	return {
+		coreMemory: typeof parsed.coreMemory === "boolean" ? parsed.coreMemory : DEFAULT_SETTINGS.coreMemory,
+		coreLimit: boundedInteger(parsed.coreLimit, DEFAULT_SETTINGS.coreLimit, 1, 50),
+		maxCoreChars: boundedInteger(parsed.maxCoreChars, DEFAULT_SETTINGS.maxCoreChars, 500, 10_000),
+		autoRecall: typeof parsed.autoRecall === "boolean" ? parsed.autoRecall : DEFAULT_SETTINGS.autoRecall,
+		recallLimit: boundedInteger(parsed.recallLimit, DEFAULT_SETTINGS.recallLimit, 1, 50),
+		maxRecallChars: boundedInteger(parsed.maxRecallChars, DEFAULT_SETTINGS.maxRecallChars, 500, 20_000),
+		proactiveCapture: typeof parsed.proactiveCapture === "boolean" ? parsed.proactiveCapture : DEFAULT_SETTINGS.proactiveCapture,
+		staleAfterDays: boundedInteger(parsed.staleAfterDays, DEFAULT_SETTINGS.staleAfterDays, 7, 3650),
+	};
+}
+
 async function loadSettings(): Promise<MemorySettings> {
 	try {
-		const parsed = JSON.parse(await readFile(settingsPath(), "utf8")) as Partial<MemorySettings>;
-		return {
-			coreMemory: parsed.coreMemory !== false,
-			coreLimit: Math.max(1, Math.min(50, Number(parsed.coreLimit ?? DEFAULT_SETTINGS.coreLimit))),
-			maxCoreChars: Math.max(500, Math.min(10_000, Number(parsed.maxCoreChars ?? DEFAULT_SETTINGS.maxCoreChars))),
-			autoRecall: parsed.autoRecall !== false,
-			recallLimit: Math.max(1, Math.min(50, Number(parsed.recallLimit ?? DEFAULT_SETTINGS.recallLimit))),
-			maxRecallChars: Math.max(500, Math.min(20_000, Number(parsed.maxRecallChars ?? DEFAULT_SETTINGS.maxRecallChars))),
-			proactiveCapture: parsed.proactiveCapture !== false,
-			staleAfterDays: Math.max(7, Math.min(3650, Number(parsed.staleAfterDays ?? DEFAULT_SETTINGS.staleAfterDays))),
-		};
+		return parseMemorySettings(JSON.parse(await readFile(settingsPath(), "utf8")));
 	} catch {
 		return { ...DEFAULT_SETTINGS };
 	}
@@ -53,7 +68,7 @@ async function loadSettings(): Promise<MemorySettings> {
 
 async function saveSettings(settings: MemorySettings): Promise<void> {
 	await mkdir(memoryDir(), { recursive: true });
-	await writeFile(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+	await writeFile(settingsPath(), `${JSON.stringify(parseMemorySettings(settings), null, 2)}\n`, "utf8");
 }
 
 const memoryOperationQueue = new MemoryOperationQueue();
@@ -71,11 +86,15 @@ function withStore<T>(operation: (store: MemoryStore) => T): Promise<T> {
 }
 
 function scope(value: unknown, fallback: MemoryScope = "user"): MemoryScope {
-	return value === "project" ? "project" : value === "user" ? "user" : fallback;
+	if (value === undefined) return fallback;
+	if (value === "user" || value === "project") return value;
+	throw new Error("Memory scope must be user or project");
 }
 
 function category(value: unknown, fallback: MemoryCategory = "fact"): MemoryCategory {
-	return value === "preference" || value === "fact" || value === "decision" || value === "workflow" ? value : fallback;
+	if (value === undefined) return fallback;
+	if (value === "preference" || value === "fact" || value === "decision" || value === "workflow") return value;
+	throw new Error("Memory category must be preference, fact, decision, or workflow");
 }
 
 function formatMemory(record: MemorySearchResult | ReturnType<MemoryStore["get"]>): string {
@@ -101,9 +120,9 @@ const memoryToolSchema = Type.Object({
 	query: Type.Optional(Type.String({ description: "Search terms for the search action" })),
 	id: Type.Optional(Type.String({ description: "Memory ID for update or delete" })),
 	content: Type.Optional(Type.String({ description: "Concise stable memory content for save or update" })),
-	scope: Type.Optional(Type.String({ description: "Memory scope: user or project" })),
-	category: Type.Optional(Type.String({ description: "Memory category: preference, fact, decision, or workflow" })),
-	tags: Type.Optional(Type.Array(Type.String())),
+	scope: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("project")], { description: "Memory scope: user or project" })),
+	category: Type.Optional(Type.Union([Type.Literal("preference"), Type.Literal("fact"), Type.Literal("decision"), Type.Literal("workflow")], { description: "Memory category: preference, fact, decision, or workflow" })),
+	tags: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 32 })),
 	importance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
 	alwaysInject: Type.Optional(Type.Boolean({ description: "Inject this explicitly confirmed user memory on every agent turn" })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
@@ -113,15 +132,13 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "memory",
 		label: "Memory",
-		description: "Manage durable memories with one tool. During normal work, notice repeated user preferences, decisions, facts, and workflows and save useful stable patterns proactively. Search before saving, update related memories instead of duplicating them, and never save transient details, uncertainty, credentials, tokens, private keys, or raw transcripts.",
+		description: "Store and retrieve durable user or project memories. Save only stable preferences, decisions, facts, and workflows; never save secrets, uncertain details, or transcripts.",
 		promptSnippet: "Search, save, update, list, or delete durable memories",
 		promptGuidelines: [
-			"Use memory action search before saving or updating when a related memory may already exist.",
-			"Use memory action save when the current conversation reveals a stable preference, decision, fact, or workflow, even if the user did not say remember.",
-			"Infer patterns conservatively: prefer repeated behavior or clear durable signals, not one-off requests or temporary task context.",
-			"Apply memories by relevance, recency, importance, and confirmed reuse. Treat memories that have not been relevant for a long time as stale and avoid relying on them without reconfirmation.",
-			"Use memory action update to consolidate an existing memory. Use alwaysInject only for explicitly confirmed core memories, not inferred patterns.",
-			"Never save credentials, tokens, private keys, raw auth files, sensitive values, or unrestricted conversation transcripts.",
+			"Search before saving or updating related memories; update instead of duplicating.",
+			"Proactively save clear, durable patterns, not one-off or temporary task context.",
+			"Set alwaysInject only for explicitly confirmed core memories.",
+			"Never save credentials, tokens, private keys, raw auth files, sensitive values, or unrestricted transcripts.",
 		],
 		parameters: memoryToolSchema,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -156,11 +173,14 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 					return { content: [{ type: "text", text: `Saved memory ${record.id}.` }], details: { action, record } };
 				}
 				case "update": {
-					if (!params.id) throw new Error("The update action requires id");
+					if (!params.id?.trim()) throw new Error("The update action requires id");
+					if ([params.content, params.scope, params.category, params.tags, params.importance, params.alwaysInject].every((value) => value === undefined)) {
+						throw new Error("The update action requires at least one changed field");
+					}
 					const record = await withStore((store) => store.update(params.id, {
 						content: params.content,
-						scope: params.scope ? scope(params.scope) : undefined,
-						category: params.category ? category(params.category) : undefined,
+						scope: params.scope === undefined ? undefined : scope(params.scope),
+						category: params.category === undefined ? undefined : category(params.category),
 						tags: params.tags,
 						importance: params.importance,
 						alwaysInject: params.alwaysInject,
@@ -292,17 +312,18 @@ function registerMemoryCommands(pi: ExtensionAPI): void {
 }
 
 function memoryGuidance(): string {
-	return [
-		"Memory behavior:",
-		"- Be proactive but selective about stable user preferences, confirmed decisions, durable facts, and reusable workflows.",
-		"- When the user explicitly asks to remember something, or you notice a stable pattern across the current work, use the memory tool with action save or update.",
-		"- Do not save transient task details, uncertain assumptions, credentials, tokens, private keys, raw auth files, or unrestricted transcripts.",
-		"- Prefer updating or reusing an existing memory over creating a duplicate.",
-		"- Notice repeated patterns in how the user works, but do not save every request or one-off detail; inferred memories should not use alwaysInject unless the user explicitly confirms them.",
-	].join("\n");
+	return "Memory: proactively save only clear durable patterns; search before adding and never save secrets or transcripts.";
 }
 
 function registerRecallHook(pi: ExtensionAPI): void {
+	let lastArchivalSignature: string | undefined;
+	const resetArchivalSignature = () => {
+		lastArchivalSignature = undefined;
+	};
+	pi.on("session_start", resetArchivalSignature);
+	pi.on("session_compact", resetArchivalSignature);
+	pi.on("session_before_fork", resetArchivalSignature);
+	pi.on("session_before_switch", resetArchivalSignature);
 	pi.on("before_agent_start", async (event) => {
 		const settings = await loadSettings();
 		const core = settings.coreMemory
@@ -313,29 +334,34 @@ function registerRecallHook(pi: ExtensionAPI): void {
 			}))
 			: [];
 		const coreIds = new Set(core.map((record) => record.id));
+		// Automatic recall is intentionally read-only: only explicit tool and
+		// command searches refresh lastUsedAt/retrievalCount.
 		const archival = settings.autoRecall && event.prompt.trim()
 			? (await withStore((store) => store.search(event.prompt, {
 				scopes: ["user"],
 				limit: settings.recallLimit,
 				maxAgeDays: settings.staleAfterDays,
-				recordUsage: true,
-			}))).filter((record) => !coreIds.has(record.id))
+				recordUsage: false,
+			}))).filter((record) => !coreIds.has(record.id) && isMeaningfullyRelevant(record, event.prompt))
 			: [];
 		const lines: string[] = [];
 		if (core.length > 0) {
+			// Confirmed core memories deliberately remain on every turn.
 			lines.push("[CORE USER MEMORY]");
 			lines.push(...core.map((record) => `- ${record.id}: ${record.content}`));
 		}
-		if (archival.length > 0) {
-			let used = 0;
-			const selected: string[] = [];
-			for (const result of archival) {
-				const line = `- ${result.id}: ${result.content}`;
-				if (used + line.length > settings.maxRecallChars) break;
-				selected.push(line);
-				used += line.length;
-			}
-			if (selected.length > 0) lines.push("[RELEVANT USER MEMORY]", ...selected);
+		const selected: string[] = [];
+		let used = 0;
+		for (const record of archival) {
+			const line = `- ${record.id}: ${record.content}`;
+			if (used + line.length > settings.maxRecallChars) break;
+			selected.push(line);
+			used += line.length;
+		}
+		const archivalSignature = selected.join("\n");
+		if (selected.length > 0 && archivalSignature !== lastArchivalSignature) {
+			lines.push("[RELEVANT USER MEMORY]", ...selected);
+			lastArchivalSignature = archivalSignature;
 		}
 		const result: {
 			message?: { customType: string; content: string; display: boolean };

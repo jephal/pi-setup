@@ -45,13 +45,13 @@
       "extensions/subagent/index.ts",
       "extensions/ask-questions.ts",
       "extensions/plan-mode.ts",
+      "extensions/scheduled-tasks.ts",
+      "extensions/notes.ts",
       "extensions/approval-modes.ts",
       "extensions/memory.ts",
-      "extensions/notes.ts",
       "node_modules/pi-fovea/src/index.ts",
       "extensions/datadog-mcp.ts",
-      "extensions/herdr-shell.ts",
-      "extensions/scheduled-tasks.ts"
+      "extensions/herdr-shell.ts"
     ],
     "prompts": [
       "prompts/*.md"

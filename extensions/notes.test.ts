@@ -18,10 +18,11 @@ test("registers the agent-first Notes tool surface", () => {
 		registerCommand(name: string) {
 			commands.push(name);
 		},
+		on() {},
 	};
 
 	notesExtension(fakePi as unknown as ExtensionAPI);
-	assert.deepEqual(tools, ["notes_list", "notes_search", "notes_read", "notes_write", "notes_transfer", "notes_open_viewer", "notes_open_note", "notes_refresh", "notes_save", "notes_git"]);
+	assert.deepEqual(tools, ["notes_list", "notes_search", "notes_read", "notes_write", "notes_transfer", "notes_open_viewer", "notes_admin_tools", "notes_open_note", "notes_refresh", "notes_save", "notes_git"]);
 	assert.deepEqual(commands, ["notes", "notes-open"]);
 });
 
@@ -47,6 +48,7 @@ test("returns a direct VM command when Herdr is unavailable", async () => {
 				definitions.push(definition);
 			},
 			registerCommand() {},
+			on() {},
 			getAllTools() {
 				return [];
 			},
@@ -65,6 +67,29 @@ test("returns a direct VM command when Herdr is unavailable", async () => {
 		else process.env.NOTES_PATH = previousVault;
 		await rm(root, { recursive: true, force: true });
 	}
+});
+
+test("activates optional Notes administration tools only when requested", async () => {
+	const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any>; description?: string; promptGuidelines?: string[] }> = [];
+	let activeTools = ["notes_list", "notes_search", "notes_admin_tools"];
+	const fakePi = {
+		registerTool(definition: { name: string; execute: (...args: any[]) => Promise<any>; description?: string; promptGuidelines?: string[] }) { definitions.push(definition); },
+		registerCommand() {},
+		on() {},
+		getActiveTools() { return activeTools; },
+		setActiveTools(next: string[]) { activeTools = next; },
+	};
+	notesExtension(fakePi as unknown as ExtensionAPI);
+	const search = definitions.find((definition) => definition.name === "notes_search")!;
+	const loader = definitions.find((definition) => definition.name === "notes_admin_tools")!;
+	assert.match(search.description!, /Bounded grep-like search/);
+	assert.match(search.promptGuidelines!.join("\n"), /Search before reading/);
+	assert.match(loader.promptGuidelines!.join("\n"), /Select open_note only/);
+	assert.match(loader.promptGuidelines!.join("\n"), /Select git only/);
+	const result = await loader.execute("test", { action: "git" });
+	assert.equal(result.content[0].text, "Activated notes_git.");
+	assert.ok(activeTools.includes("notes_git"));
+	assert.equal(activeTools.includes("notes_save"), false);
 });
 
 test("adds a stable YAML header when note content has no frontmatter", () => {

@@ -2,11 +2,13 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { OTHER_OPTION_LABEL, createEditableOptionsComponent } from "../src/pi-ui/index.js";
 import { Markdown } from "@earendil-works/pi-tui";
-import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
+import { PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
+import { PLAN_TOOLS, restoreActiveTools } from "./approval-tools.ts";
 
 const MODES = ["manual", "approve", "auto", "review", "plan"] as const;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -21,7 +23,6 @@ const MODE_LABELS: Record<ApprovalMode, string> = {
 	plan: "Plan",
 };
 
-const PLAN_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "ask_questions", "plan"]);
 const HITL_TOOLS = new Set(["ask_questions", "plan"]);
 const PLAN_TOOL_MARKER = "__pi_plan_tool_registered__";
 
@@ -82,9 +83,20 @@ interface LocalPlanStep { id: number; title: string; status: string; }
 interface LocalPlanExecution { active: boolean; startedAt?: string; completedAt?: string; }
 interface LocalPlan { name: string; content: string; steps: LocalPlanStep[]; identity: LocalPlanIdentity; updatedAt: string; execution?: LocalPlanExecution; }
 
+function planRepositoryDir(identity: LocalPlanIdentity): string {
+	const repositorySlug = identity.repository.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "default";
+	const repoKey = `${repositorySlug}-${createHash("sha1").update(identity.root).digest("hex").slice(0, 8)}`;
+	return join(homedir(), ".pi", "agent", "plans", repoKey);
+}
+
 function planDir(identity: LocalPlanIdentity): string {
-	const repoKey = `${identity.repository.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${createHash("sha1").update(identity.root).digest("hex").slice(0, 8)}`;
-	return join(homedir(), ".pi", "agent", "plans", repoKey, "sessions", identity.sessionId);
+	const branchSlug = identity.branch.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "default";
+	const branchKey = `${branchSlug}-${createHash("sha1").update(identity.branch).digest("hex").slice(0, 8)}`;
+	return join(planRepositoryDir(identity), "branches", branchKey);
+}
+
+function legacyPlanDir(identity: LocalPlanIdentity): string {
+	return join(planRepositoryDir(identity), "sessions", identity.sessionId);
 }
 
 async function planIdentity(pi: ExtensionAPI, ctx: ExtensionContext): Promise<LocalPlanIdentity> {
@@ -96,25 +108,44 @@ async function planIdentity(pi: ExtensionAPI, ctx: ExtensionContext): Promise<Lo
 	return { repository: root.split("/").pop() || "project", branch, worktree: ctx.cwd, root, sessionId: ctx.sessionManager.getSessionId() };
 }
 
+async function writeLocalPlanAtomically(filePath: string, content: string): Promise<void> {
+	const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
+	try {
+		await writeFile(temporaryPath, content, "utf8");
+		await rename(temporaryPath, filePath);
+	} finally {
+		await rm(temporaryPath, { force: true }).catch(() => undefined);
+	}
+}
+
 async function saveLocalPlan(plan: LocalPlan): Promise<string> {
 	const dir = planDir(plan.identity);
 	await mkdir(join(dir, "archive"), { recursive: true });
-	await writeFile(join(dir, "current.md"), plan.content, "utf8");
-	await writeFile(join(dir, "current.json"), JSON.stringify(plan, null, 2), "utf8");
-	await writeFile(join(dir, "current.todo.jsonl"), plan.steps.map((step) => JSON.stringify(step)).join("\n") + "\n", "utf8");
+	await Promise.all([
+		writeLocalPlanAtomically(join(dir, "current.md"), plan.content),
+		writeLocalPlanAtomically(join(dir, "current.todo.jsonl"), plan.steps.map((step) => JSON.stringify(step)).join("\n") + "\n"),
+	]);
+	await writeLocalPlanAtomically(join(dir, "current.json"), JSON.stringify(plan, null, 2));
 	return join(dir, "current.md");
 }
 
 async function clearLocalPlan(identity: LocalPlanIdentity): Promise<void> {
-	await rm(planDir(identity), { recursive: true, force: true });
+	await Promise.all([
+		rm(planDir(identity), { recursive: true, force: true }),
+		rm(legacyPlanDir(identity), { recursive: true, force: true }),
+	]);
 }
 
-async function loadLocalPlan(identity: LocalPlanIdentity): Promise<LocalPlan | undefined> {
+async function readLocalPlan(dir: string): Promise<LocalPlan | undefined> {
 	try {
-		return JSON.parse(await readFile(join(planDir(identity), "current.json"), "utf8")) as LocalPlan;
+		return JSON.parse(await readFile(join(dir, "current.json"), "utf8")) as LocalPlan;
 	} catch {
 		return undefined;
 	}
+}
+
+async function loadLocalPlan(identity: LocalPlanIdentity): Promise<LocalPlan | undefined> {
+	return (await readLocalPlan(planDir(identity))) ?? readLocalPlan(legacyPlanDir(identity));
 }
 
 function isCompleted(step: LocalPlanStep): boolean {
@@ -218,15 +249,9 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "plan",
 		label: "Plan",
-		description: "Create, update, review, or clear a complete Markdown plan scoped to this Pi session.",
-		promptSnippet: "Create a full structured plan for substantial multi-step changes",
-		promptGuidelines: [
-			"Use plan action=create for substantial multi-step changes. Start with a concise 'In short' section of 3–7 bullets and a short 'What happens next' section; put technical detail below those sections.",
-			"Prefer a plan the user can understand quickly. Include rationale, trade-offs, and validation when useful without repeating the same information.",
-			"Use plan action=update after user feedback, plan action=status to inspect progress, and plan action=clear when done.",
-			"Provide structured steps for plan create/update so they can be shown as Task checkpoints in the Markdown preview and tracked during execution.",
-			"During approved execution, after each individual checkpoint is completed, immediately include [DONE:n] for its step id in your next response; do not wait until all checkpoints are complete, then continue with the next remaining checkpoint.",
-		],
+		description: PLAN_TOOL_DESCRIPTION,
+		promptSnippet: PLAN_TOOL_PROMPT_SNIPPET,
+		promptGuidelines: PLAN_TOOL_PROMPT_GUIDELINES,
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("status"), Type.Literal("clear")]),
 			name: Type.Optional(Type.String()),
@@ -335,7 +360,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	}
 
 	function restoreTools(): void {
-		if (toolsBeforePlan) pi.setActiveTools(toolsBeforePlan);
+		if (toolsBeforePlan) pi.setActiveTools(restoreActiveTools(toolsBeforePlan, pi.getActiveTools()));
 		toolsBeforePlan = undefined;
 	}
 
@@ -356,7 +381,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			// read-only mode uses the same safe set until we leave it.
 			toolsBeforePlan = pi.getActiveTools();
 		}
-		if (isReadOnly) {
+		if (isReadOnly && !wasReadOnly) {
 			pi.setActiveTools(planToolNames());
 		} else if (wasReadOnly) {
 			restoreTools();
@@ -405,7 +430,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		handler: (ctx) => cycleMode(ctx),
 	});
 
-	pi.registerCommand("plan", {
+	if (ownsPlanTool) pi.registerCommand("plan", {
 		description: "Show or clear the current session plan",
 		handler: async (args, ctx) => {
 			const identity = await planIdentity(pi, ctx);
@@ -537,11 +562,9 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			plan: "You are in read-only plan mode. Do not edit or write files. Use only safe inspection tools and simple read-only bash commands.",
 		};
 		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n`;
-		content += "For substantial multi-step changes, create a complete but concise Plan: before acting. Start with an 'In short' section of 3–7 user-readable bullets and a 'What happens next' section of 3–7 steps. Include rationale, trade-offs, visualizations, implementation phases, and validation when useful, but keep technical detail below the summary and avoid repetition.\n\n";
-		content += "When the plan tool is available, use it immediately for substantial multi-step changes: do not write the plan as normal chat. Put the concise summary, next steps, and useful technical detail in plan.create so the plan preview and review selector can appear.\n\n";
 		content += mode === "plan"
-			? "Plan mode is the locked-in planning workflow: use the plan tool to store the complete Markdown plan and structured phases, then wait for its small review selector before executing. Do not edit or write files. You may use ask_questions for clarification, then revise the complete plan. Wait for the user’s plan decision before executing.\n"
-			: "Outside Plan mode, a Plan: is guidance rather than a blocking approval step. Follow the current approval mode and do not wait for a plan decision UI. If a plan tool result says PLAN MODE EXITED or executionReady, begin implementation immediately instead of continuing to plan.\n";
+			? "Use the plan tool for substantial work; wait for its review selector before executing.\n"
+			: "For substantial work, use the plan tool rather than writing a plan in chat. If it returns PLAN MODE EXITED or executionReady, begin implementation.\n";
 		if (ownsPlanTool && activeExecutionPlan?.execution?.active && activeExecutionPlan.steps.length > 0) {
 			const remaining = activeExecutionPlan.steps.filter((step) => !isCompleted(step));
 			content += `[PLAN CHECKPOINTS ACTIVE]\nRemaining checkpoints:\n${remaining.map((step) => `${step.id}. ${step.title}`).join("\n")}\nAfter completing each individual checkpoint, immediately include [DONE:n] in your next response using its step id; do not wait until all checkpoints are complete. Then continue with the next remaining checkpoint.\n\n`;

@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Markdown } from "@earendil-works/pi-tui";
 import { OTHER_OPTION_LABEL, createEditableOptionsComponent } from "../src/pi-ui/index.js";
 import { Type } from "typebox";
+import { PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
 import {
 	clearPlan,
 	loadPlan,
@@ -34,6 +35,14 @@ async function identity(cwd: string): Promise<PlanIdentity> {
 	const branch = await git(cwd, ["branch", "--show-current"]) || `detached-${(await git(cwd, ["rev-parse", "--short", "HEAD"])) ?? "unknown"}`;
 	const repository = root.split("/").pop() || "project";
 	return { repository, branch, worktree: cwd, root, sessionId: "unknown" };
+}
+
+async function sessionIdentity(ctx: ExtensionContext): Promise<PlanIdentity> {
+	return { ...(await identity(ctx.cwd)), sessionId: ctx.sessionManager.getSessionId() };
+}
+
+function changedPlanScope(left: PlanIdentity | undefined, right: PlanIdentity): boolean {
+	return !left || left.root !== right.root || left.branch !== right.branch;
 }
 
 function parseSteps(input: unknown): PlanStep[] {
@@ -121,6 +130,7 @@ function reviewOptions() {
 }
 
 export default function planMode(pi: ExtensionAPI): void {
+	const ownsPlanTool = (globalThis as Record<string, unknown>)[PLAN_TOOL_MARKER] !== "approval";
 	pi.events.emit("plan-tool:available", { version: "0.0.1" });
 	pi.events.on("approval-mode:changed", (data) => {
 		if (data && typeof data === "object" && "mode" in data && typeof data.mode === "string") currentMode = data.mode;
@@ -129,20 +139,13 @@ export default function planMode(pi: ExtensionAPI): void {
 	// Register the plan tool once at extension startup. Mode changes only
 	// change the active tool policy; they never add/remove this tool. If the
 	// standalone approval package owns the fallback, it remains the owner.
-	if ((globalThis as Record<string, unknown>)[PLAN_TOOL_MARKER] !== "approval") {
+	if (ownsPlanTool) {
 	pi.registerTool({
 		name: "plan",
 		label: "Plan",
-		description: "Create, update, inspect, or clear a full Markdown plan scoped to the current Git branch. The plan content is shown in the normal transcript, with a review gate in locked-in Plan mode.",
-		promptSnippet: "Create and review a structured plan for substantial multi-step changes",
-		promptGuidelines: [
-			"Use plan action=create for substantial multi-step changes; handle small, localized tasks directly. Start with a concise 'In short' section of 3–7 bullets and a short 'What happens next' section; put technical detail below those sections.",
-			"Prefer a plan the user can understand quickly. Do not repeat the same rationale in multiple sections or make every detail equally prominent.",
-			"Use plan action=update when the user gives plan feedback.",
-			"Provide structured steps for plan create/update so they can be shown as Task checkpoints in the Markdown preview and tracked during execution.",
-			"During approved execution, after each individual checkpoint is completed, immediately include [DONE:n] for its step id in your next response; do not wait until all checkpoints are complete, then continue with the next remaining checkpoint.",
-			"Use plan action=status to inspect the active branch plan and plan action=clear when the work is complete or abandoned.",
-		],
+		description: PLAN_TOOL_DESCRIPTION,
+		promptSnippet: PLAN_TOOL_PROMPT_SNIPPET,
+		promptGuidelines: PLAN_TOOL_PROMPT_GUIDELINES,
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("status"), Type.Literal("clear")]),
 			name: Type.Optional(Type.String()),
@@ -156,7 +159,7 @@ export default function planMode(pi: ExtensionAPI): void {
 			return new Markdown(checkpointMarkdown(params.content?.trim() || "Preparing plan…", parseSteps(params.steps)), 1, 0, getMarkdownTheme());
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const id = currentIdentity ?? { ...(await identity(ctx.cwd)), sessionId: ctx.sessionManager.getSessionId() };
+			const id = await sessionIdentity(ctx);
 			currentIdentity = id;
 			if (params.action === "status") {
 				const plan = await loadPlan(id);
@@ -227,13 +230,22 @@ export default function planMode(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		currentIdentity = { ...(await identity(ctx.cwd)), sessionId: ctx.sessionManager.getSessionId() };
+		if (!ownsPlanTool) return;
+		currentIdentity = await sessionIdentity(ctx);
 		activeExecutionPlan = await loadPlan(currentIdentity);
 		if (!activeExecutionPlan?.execution?.active) activeExecutionPlan = undefined;
 		updateCheckpointWidget(ctx, activeExecutionPlan);
 	});
 
-	pi.on("before_agent_start", async () => {
+	pi.on("before_agent_start", async (_event, ctx) => {
+		if (!ownsPlanTool) return;
+		const nextIdentity = await sessionIdentity(ctx);
+		if (changedPlanScope(currentIdentity, nextIdentity)) {
+			currentIdentity = nextIdentity;
+			activeExecutionPlan = await loadPlan(nextIdentity);
+			if (!activeExecutionPlan?.execution?.active) activeExecutionPlan = undefined;
+			updateCheckpointWidget(ctx, activeExecutionPlan);
+		}
 		const plan = activeExecutionPlan;
 		if (!plan?.execution?.active || plan.steps.length === 0) return;
 		const remaining = plan.steps.filter((step) => !isCompleted(step));
@@ -247,6 +259,7 @@ export default function planMode(pi: ExtensionAPI): void {
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
+		if (!ownsPlanTool) return;
 		const plan = activeExecutionPlan;
 		if (!plan?.execution?.active) return;
 		if (!markCompletedCheckpoints(plan, assistantText(event.message))) return;
@@ -263,10 +276,10 @@ export default function planMode(pi: ExtensionAPI): void {
 		updateCheckpointWidget(ctx, plan);
 	});
 
-	pi.registerCommand("plan", {
+	if (ownsPlanTool) pi.registerCommand("plan", {
 		description: "Show or manage the current branch plan",
 		handler: async (args, ctx) => {
-			const id = currentIdentity ?? { ...(await identity(ctx.cwd)), sessionId: ctx.sessionManager.getSessionId() };
+			const id = await sessionIdentity(ctx);
 			currentIdentity = id;
 			const action = args.trim() || "status";
 			if (action === "clear") {

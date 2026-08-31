@@ -10,6 +10,7 @@ import {
   parseVersion,
   supportsTabShell,
 } from "./herdr-client.ts";
+import { truncateHerdrOutput } from "./herdr-shell.ts";
 
 test("extracts Herdr tab and pane identifiers from CLI envelopes", () => {
   const envelope = {
@@ -45,6 +46,14 @@ test("parses JSON commands and preserves plain-text pane output", async () => {
   assert.deepEqual(await client.run(["tab", "get", "w1:t2"]), { ok: true });
   assert.equal(await client.runText(["pane", "read", "w1:p2"]), "line one\nline two");
   assert.deepEqual(calls, [["tab", "get", "w1:t2"], ["pane", "read", "w1:p2"]]);
+});
+
+test("bounds Herdr output by lines and marks the result", () => {
+  const output = truncateHerdrOutput("one\ntwo\nthree", 2);
+  assert.equal(output.text.startsWith("two\nthree"), true);
+  assert.equal(output.truncation.truncated, true);
+  assert.equal(output.truncation.truncatedBy, "lines");
+  assert.match(output.text, /Recent output truncated/);
 });
 
 test("normalizes Herdr CLI errors", async () => {
