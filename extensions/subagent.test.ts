@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Message } from "@earendil-works/pi-ai";
-import { boundHeadText, boundText, buildChildArgs, childProcessToolNames, childToolNames, compactResult, getFinalOutput, isFailedResult, sanitizeText, unsupportedChildToolNames } from "./subagent/index.ts";
+import registerSubagent, { boundHeadText, boundText, buildChildArgs, childProcessToolNames, childToolNames, compactResult, getFinalOutput, isFailedResult, sanitizeText, unsupportedChildToolNames } from "./subagent/index.ts";
+
+test("subagent tool contract lists the bundled agent names", () => {
+	const registered: any[] = [];
+	registerSubagent({
+		on: () => undefined,
+		registerTool: (tool: any) => registered.push(tool),
+	} as any);
+
+	const definition = registered.find((tool) => tool.name === "subagent");
+	assert.ok(definition);
+	for (const name of ["scout", "planner", "reviewer", "worker", "datadog-investigator"]) {
+		assert.match(definition.description, new RegExp(name));
+		assert.match(definition.parameters.properties.agent.description, new RegExp(name));
+	}
+});
 
 test("subagent helpers concatenate final assistant text and sanitize bounded output", () => {
 	const messages = [
