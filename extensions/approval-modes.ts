@@ -7,7 +7,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
+import { checklistMarkdown, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
 import { PLAN_TOOLS, restoreActiveTools } from "./approval-tools.ts";
 
 const MODES = ["manual", "approve", "auto", "review", "plan"] as const;
@@ -583,7 +583,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		};
 		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n`;
 		content += mode === "plan"
-			? "Use the plan tool for substantial work; create or refine the full Markdown plan and wait for its review selector before executing.\n"
+			? `Use the plan tool for substantial work; create or refine the full Markdown plan and wait for its review selector before executing. ${PLAN_MODE_WRITING_STYLE}\n`
 			: "Outside Plan mode, use the plan tool only for a short checklist for a small task. Do not use it to plan substantial work; enter Plan mode first. If an approved plan returns PLAN MODE EXITED or executionReady, begin implementation.\n";
 		if (ownsPlanTool && activeExecutionPlan?.execution?.active && activeExecutionPlan.steps.length > 0) {
 			const remaining = activeExecutionPlan.steps.filter((step) => !isCompleted(step));
