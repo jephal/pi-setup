@@ -623,14 +623,23 @@ async function runSingleAgent(
 	}
 }
 
+const BUNDLED_AGENT_GUIDANCE = [
+	"scout — fast repository reconnaissance (gpt-5.6-luna)",
+	"planner — read-only implementation planning (claude-opus-5)",
+	"reviewer — read-only code quality and security review (claude-opus-5)",
+	"worker — general implementation with full capabilities (gpt-5.6-terra)",
+	"datadog-investigator — read-only evidence-first Datadog investigation (gpt-5.6-luna)",
+].join("; ");
+const AGENT_NAME_DESCRIPTION = `Exact bundled agent names: ${BUNDLED_AGENT_GUIDANCE}. Custom user/project agents may also be available; they are discovered at runtime.`;
+
 const TaskItem = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
+	agent: Type.String({ description: AGENT_NAME_DESCRIPTION }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
 
 const ChainItem = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
+	agent: Type.String({ description: AGENT_NAME_DESCRIPTION }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
@@ -641,7 +650,7 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 });
 
 const SubagentParams = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
+	agent: Type.Optional(Type.String({ description: `${AGENT_NAME_DESCRIPTION} (for single mode)` })),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
@@ -669,7 +678,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: `Delegate large or context-heavy work to isolated agents; handle small edits directly. Modes: single, parallel for independent work, or chain with {previous}. Children cannot delegate. Default scope: user; use both or project for ${CONFIG_DIR_NAME}/agents.`,
+		description: `Delegate large or context-heavy work to isolated agents; handle small edits directly. Modes: single, parallel for independent work, or chain with {previous}. Children cannot delegate. Available bundled agents (use these exact names): ${BUNDLED_AGENT_GUIDANCE}. Default scope: user; use both or project for ${CONFIG_DIR_NAME}/agents to include custom project agents.`,
 		promptSnippet: "Delegate large or parallelizable work to isolated subagents",
 		promptGuidelines: [
 			"For substantial implementation, chain a worker, reviewer, then worker to apply review feedback.",
