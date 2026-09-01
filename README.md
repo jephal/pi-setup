@@ -44,6 +44,8 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Markdown task checkpoints and above-editor execution progress
   - Visible Plan → execution transitions
   - Full Markdown plans in Plan mode; compact checklist-only tracking outside Plan mode
+  - Plan mode keeps non-code-changing tools available, including notes, memory, Fovea, Herdr inspection, Datadog investigation, and scheduled tasks
+  - Project code mutation tools and unsafe shell commands remain blocked in Plan mode
   - Decision-first plan format: scope and conclusion first, key decisions, rationale, trade-offs, risks, and next decision
 - Memory
   - Local SQLite-backed user and project memories
