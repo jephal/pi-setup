@@ -7,7 +7,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
+import { checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
 import { PLAN_TOOLS, restoreActiveTools } from "./approval-tools.ts";
 
 const MODES = ["manual", "approve", "auto", "review", "plan"] as const;
@@ -81,7 +81,7 @@ function inputString(input: Record<string, unknown>, ...keys: string[]): string 
 interface LocalPlanIdentity { repository: string; branch: string; worktree: string; root: string; sessionId: string; }
 interface LocalPlanStep { id: number; title: string; status: string; }
 interface LocalPlanExecution { active: boolean; startedAt?: string; completedAt?: string; }
-interface LocalPlan { name: string; content: string; steps: LocalPlanStep[]; identity: LocalPlanIdentity; updatedAt: string; execution?: LocalPlanExecution; }
+interface LocalPlan { name: string; kind?: "plan" | "checklist"; content: string; steps: LocalPlanStep[]; identity: LocalPlanIdentity; updatedAt: string; execution?: LocalPlanExecution; }
 
 function planRepositoryDir(identity: LocalPlanIdentity): string {
 	const repositorySlug = identity.repository.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "default";
@@ -262,7 +262,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			// Keep the fallback plan in the ordinary tool transcript. The shared
 			// pi-ui component is reserved for the review/feedback gate.
 			const steps = (params.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" }));
-			return new Markdown(checkpointMarkdown(params.content?.trim() || "Preparing plan…", steps), 1, 0, getMarkdownTheme());
+			const content = params.content?.trim() || (steps.length ? checklistMarkdown(params.name?.trim() || "current-checklist", steps) : "Preparing checklist…");
+			return new Markdown(checkpointMarkdown(content, steps), 1, 0, getMarkdownTheme());
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const identity = await planIdentity(pi, ctx);
@@ -273,17 +274,36 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				return { content: [{ type: "text", text: `Cleared the active plan for ${identity.branch}.` }], details: { cleared: true, identity } };
 			}
 			if (params.action === "status") {
-				try {
-					const content = await readFile(join(planDir(identity), "current.md"), "utf8");
-					return { content: [{ type: "text", text: `Active plan for ${identity.branch}:\n${content}` }], details: { identity } };
-				} catch {
-					return { content: [{ type: "text", text: `No active plan for ${identity.branch}.` }], details: { identity } };
+				const plan = await loadLocalPlan(identity);
+				const label = plan?.kind === "checklist" ? "Active checklist" : "Active plan";
+				return { content: [{ type: "text", text: plan ? `${label} for ${identity.branch}:\n${plan.content}` : `No active plan for ${identity.branch}.` }], details: plan ? { identity, plan } : { identity } };
+			}
+			const previous = await loadLocalPlan(identity);
+			if (mode !== "plan") {
+				if (params.content?.trim()) throw new Error("Outside Plan mode, create/update accepts checklist steps only. Enter Plan mode for a full Markdown plan.");
+				const steps = (params.steps ?? previous?.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" }));
+				if (!steps.length) throw new Error("Outside Plan mode, create/update requires at least one checklist step. Enter Plan mode for a full Markdown plan.");
+				const name = params.name?.trim() || previous?.name || "current-checklist";
+				const plan: LocalPlan = {
+					name,
+					kind: previous?.execution?.active ? (previous.kind ?? "plan") : "checklist",
+					content: previous?.execution?.active ? previous.content : checklistMarkdown(name, steps),
+					steps,
+					identity,
+					updatedAt: new Date().toISOString(),
+					execution: previous?.execution?.active ? previous.execution : undefined,
+				};
+				const filePath = await saveLocalPlan(plan);
+				if (plan.execution?.active) {
+					activeExecutionPlan = plan;
+					updateCheckpointWidget(ctx, plan);
 				}
+				return { content: [{ type: "text", text: `Saved checklist for branch ${identity.branch}: ${filePath}` }], details: { plan, checklistOnly: true } };
 			}
 			if (!params.content?.trim()) throw new Error("plan create/update requires complete Markdown content");
-			const previous = await loadLocalPlan(identity);
 			let plan: LocalPlan = {
 				name: params.name?.trim() || previous?.name || "current-plan",
+				kind: "plan",
 				content: params.content,
 				steps: (params.steps ?? previous?.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" })),
 				identity,
@@ -563,8 +583,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		};
 		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n`;
 		content += mode === "plan"
-			? "Use the plan tool for substantial work; wait for its review selector before executing.\n"
-			: "For substantial work, use the plan tool rather than writing a plan in chat. If it returns PLAN MODE EXITED or executionReady, begin implementation.\n";
+			? "Use the plan tool for substantial work; create or refine the full Markdown plan and wait for its review selector before executing.\n"
+			: "Outside Plan mode, use the plan tool only for a short checklist for a small task. Do not use it to plan substantial work; enter Plan mode first. If an approved plan returns PLAN MODE EXITED or executionReady, begin implementation.\n";
 		if (ownsPlanTool && activeExecutionPlan?.execution?.active && activeExecutionPlan.steps.length > 0) {
 			const remaining = activeExecutionPlan.steps.filter((step) => !isCompleted(step));
 			content += `[PLAN CHECKPOINTS ACTIVE]\nRemaining checkpoints:\n${remaining.map((step) => `${step.id}. ${step.title}`).join("\n")}\nAfter completing each individual checkpoint, immediately include [DONE:n] in your next response using its step id; do not wait until all checkpoints are complete. Then continue with the next remaining checkpoint.\n\n`;

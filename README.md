@@ -43,6 +43,7 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Shared HITL decisions and feedback
   - Markdown task checkpoints and above-editor execution progress
   - Visible Plan → execution transitions
+  - Full Markdown plans in Plan mode; compact checklist-only tracking outside Plan mode
 - Memory
   - Local SQLite-backed user and project memories
   - Main-agent-driven capture of stable patterns noticed during normal work

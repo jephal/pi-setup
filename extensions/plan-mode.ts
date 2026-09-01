@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Markdown } from "@earendil-works/pi-tui";
 import { OTHER_OPTION_LABEL, createEditableOptionsComponent } from "../src/pi-ui/index.js";
 import { Type } from "typebox";
-import { PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
+import { checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
 import {
 	clearPlan,
 	loadPlan,
@@ -156,14 +156,17 @@ export default function planMode(pi: ExtensionAPI): void {
 			// Keep the plan in the ordinary tool transcript. The review gate below
 			// is the only specialized UI; the plan itself uses Pi's normal Markdown
 			// renderer instead of a persisted custom entry.
-			return new Markdown(checkpointMarkdown(params.content?.trim() || "Preparing plan…", parseSteps(params.steps)), 1, 0, getMarkdownTheme());
+			const steps = parseSteps(params.steps);
+			const content = params.content?.trim() || (steps.length ? checklistMarkdown(params.name?.trim() || "current-checklist", steps) : "Preparing checklist…");
+			return new Markdown(checkpointMarkdown(content, steps), 1, 0, getMarkdownTheme());
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const id = await sessionIdentity(ctx);
 			currentIdentity = id;
 			if (params.action === "status") {
 				const plan = await loadPlan(id);
-				return { content: [{ type: "text", text: plan ? `Active plan: ${plan.name} (${plan.steps.length} phases)` : "No active plan for this branch." }], details: plan ?? {} };
+				const label = plan?.kind === "checklist" ? "Active checklist" : "Active plan";
+				return { content: [{ type: "text", text: plan ? `${label}: ${plan.name} (${plan.steps.length} ${plan.kind === "checklist" ? "items" : "phases"})` : "No active plan for this branch." }], details: plan ?? {} };
 			}
 			if (params.action === "clear") {
 				await clearPlan(id);
@@ -171,10 +174,32 @@ export default function planMode(pi: ExtensionAPI): void {
 				updateCheckpointWidget(ctx, undefined);
 				return { content: [{ type: "text", text: `Cleared the active plan for ${id.branch}.` }], details: { cleared: true, branch: id.branch } };
 			}
-			if (!params.content?.trim()) throw new Error("plan create/update requires full Markdown content");
 			const previous = await loadPlan(id);
+			if (currentMode !== "plan") {
+				if (params.content?.trim()) throw new Error("Outside Plan mode, create/update accepts checklist steps only. Enter Plan mode for a full Markdown plan.");
+				const steps = parseSteps(params.steps ?? previous?.steps);
+				if (!steps.length) throw new Error("Outside Plan mode, create/update requires at least one checklist step. Enter Plan mode for a full Markdown plan.");
+				const name = params.name?.trim() || previous?.name || "current-checklist";
+				const plan: StoredPlan = {
+					name,
+					kind: previous?.execution?.active ? (previous.kind ?? "plan") : "checklist",
+					content: previous?.execution?.active ? previous.content : checklistMarkdown(name, steps),
+					steps,
+					identity: id,
+					updatedAt: new Date().toISOString(),
+					execution: previous?.execution?.active ? previous.execution : undefined,
+				};
+				const filePath = await savePlan(plan);
+				if (plan.execution?.active) {
+					activeExecutionPlan = plan;
+					updateCheckpointWidget(ctx, plan);
+				}
+				return { content: [{ type: "text", text: `Saved checklist for branch ${id.branch}: ${filePath}` }], details: { plan, checklistOnly: true } };
+			}
+			if (!params.content?.trim()) throw new Error("plan create/update requires full Markdown content");
 			const plan: StoredPlan = {
 				name: params.name?.trim() || previous?.name || "current-plan",
+				kind: "plan",
 				content: params.content,
 				steps: parseSteps(params.steps ?? previous?.steps),
 				identity: id,
