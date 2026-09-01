@@ -90,5 +90,5 @@ export function summarizePlanChanges(previous: PlanChangeSnapshot | undefined, n
 }
 
 export function planUpdateNotice(previous: PlanChangeSnapshot | undefined, next: PlanChangeSnapshot): string {
-	return `Plan changes:\n${summarizePlanChanges(previous, next)}\n\n${PLAN_UPDATE_RESPONSE_GUIDANCE}`;
+	return `[PLAN UPDATE CONTEXT — NOT PLAN CONTENT]\nPlan changes:\n${summarizePlanChanges(previous, next)}\n\n${PLAN_UPDATE_RESPONSE_GUIDANCE} Do not add this explanation to the saved plan.`;
 }

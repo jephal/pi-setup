@@ -36,7 +36,10 @@ test("plan updates summarize changed sections and checklist steps", () => {
 	assert.match(summary, /Removed checklist steps: 2\. Implement/);
 	assert.match(summary, /Changed checklist steps: 1 \(status\)/);
 	assert.match(summary, /Added plan sections: Risks/);
-	assert.match(planUpdateNotice(previous, next), /what changed, why it changed/);
+	const notice = planUpdateNotice(previous, next);
+	assert.match(notice, /PLAN UPDATE CONTEXT/);
+	assert.match(notice, /what changed, why it changed/);
+	assert.match(notice, /Do not add this explanation to the saved plan/);
 });
 
 test("checklist Markdown is compact and preserves completed step state", () => {
