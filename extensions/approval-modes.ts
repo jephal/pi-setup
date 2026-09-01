@@ -206,6 +206,15 @@ function updateCheckpointWidget(ctx: ExtensionContext, plan: LocalPlan | undefin
 	ctx.ui.setWidget("plan-checkpoints", plan?.execution?.active && plan.steps.length ? checkpointWidgetLines(plan) : undefined, { placement: "aboveEditor" });
 }
 
+function queuePlanUpdateExplanation(pi: ExtensionAPI, previous: LocalPlan, next: LocalPlan): void {
+	pi.sendMessage({
+		customType: "plan-update-context",
+		content: planUpdateNotice(previous, next),
+		display: false,
+		details: { previousName: previous.name, nextName: next.name },
+	}, { deliverAs: "steer" });
+}
+
 function reviewOptions() {
 	return [
 		{ key: "approve-auto", label: "Approve — start execution in Auto mode", description: "Leave Plan mode and continue without per-tool approval prompts.", editable: false },
@@ -279,7 +288,6 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				return { content: [{ type: "text", text: plan ? `${label} for ${identity.branch}:\n${plan.content}` : `No active plan for ${identity.branch}.` }], details: plan ? { identity, plan } : { identity } };
 			}
 			const previous = await loadLocalPlan(identity);
-			const updateNotice = (plan: LocalPlan) => params.action === "update" ? `\n\n${planUpdateNotice(previous, plan)}` : "";
 			if (mode !== "plan") {
 				if (params.content?.trim()) throw new Error("Outside Plan mode, create/update accepts checklist steps only. Enter Plan mode for a full Markdown plan.");
 				const steps = (params.steps ?? previous?.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" }));
@@ -299,7 +307,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 					activeExecutionPlan = plan;
 					updateCheckpointWidget(ctx, plan);
 				}
-				return { content: [{ type: "text", text: `Saved checklist for branch ${identity.branch}: ${filePath}${updateNotice(plan)}` }], details: { plan, checklistOnly: true } };
+				return { content: [{ type: "text", text: `Saved checklist for branch ${identity.branch}: ${filePath}` }], details: { plan, checklistOnly: true } };
 			}
 			if (!params.content?.trim()) throw new Error("plan create/update requires complete Markdown content");
 			let plan: LocalPlan = {
@@ -317,7 +325,10 @@ export default function approvalModes(pi: ExtensionAPI): void {
 					activeExecutionPlan = plan;
 					updateCheckpointWidget(ctx, plan);
 				}
-				if (!ctx.hasUI || mode !== "plan") return { content: [{ type: "text", text: `Saved plan to ${filePath}.${updateNotice(plan)}` }], details: { plan } };
+				if (!ctx.hasUI || mode !== "plan") {
+					if (mode === "plan" && params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+					return { content: [{ type: "text", text: `Saved plan to ${filePath}.` }], details: { plan } };
+				}
 				const review = await ctx.ui.custom<{ key: string; edit?: string } | null>(
 					(tui, theme, _keybindings, done) => createEditableOptionsComponent(tui, theme, done, {
 						title: `Review plan · ${plan.name}`,
@@ -325,7 +336,10 @@ export default function approvalModes(pi: ExtensionAPI): void {
 						initialFocus: "options",
 					}),
 				);
-				if (!review) return { content: [{ type: "text", text: `Plan saved to ${filePath}. Review cancelled; remaining in Plan mode.${updateNotice(plan)}` }], details: { plan, cancelled: true } };
+				if (!review) {
+					if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+					return { content: [{ type: "text", text: `Plan saved to ${filePath}. Review cancelled; remaining in Plan mode.` }], details: { plan, cancelled: true } };
+				}
 				if (review.key === "edit-plan") {
 					const edited = await ctx.ui.editor("Edit plan", plan.content);
 					if (edited?.trim()) { plan = { ...plan, content: edited, updatedAt: new Date().toISOString() }; }
@@ -333,7 +347,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				}
 				if (review.key === "feedback") {
 					const feedback = review.edit?.trim() ?? "";
-					return { content: [{ type: "text", text: `Keep planning. User feedback: ${feedback || "Please refine the plan."}${updateNotice(plan)}` }], details: { plan, feedback } };
+					if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+					return { content: [{ type: "text", text: `Keep planning. User feedback: ${feedback || "Please refine the plan."}` }], details: { plan, feedback } };
 				}
 				const nextMode = review.key === "approve-auto" ? "auto" : "approve";
 				const modeLabel = nextMode === "auto" ? "Auto mode" : "code-edit approvals";
@@ -344,7 +359,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				updateCheckpointWidget(ctx, plan);
 				ctx.ui.notify(announcement, "info");
 				pi.events.emit("approval-mode:set", { mode: nextMode });
-				return { content: [{ type: "text", text: `[PLAN MODE EXITED]\n${announcement}${updateNotice(plan)}\nThe plan is approved. Begin the implementation now; do not continue planning.` }], details: { plan, choice: review.key, nextMode, executionReady: true, planModeExited: true } };
+				if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+				return { content: [{ type: "text", text: `[PLAN MODE EXITED]\n${announcement}\nThe plan is approved. Begin the implementation now; do not continue planning.` }], details: { plan, choice: review.key, nextMode, executionReady: true, planModeExited: true } };
 			}
 		},
 	});
