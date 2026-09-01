@@ -61,9 +61,10 @@ interface PersistedState {
   bindings: HerdrBinding[];
 }
 
-interface HerdrContext {
+export interface HerdrContext {
   workspaceId: string;
   parentTabId?: string;
+  paneId?: string;
 }
 
 interface HerdrOpenCommandRequest {
@@ -157,26 +158,29 @@ async function resolveWorkingDirectory(ctx: ExtensionContext, requestedCwd: stri
   }
 }
 
-function extractCurrentContext(value: unknown): HerdrContext | undefined {
+export function extractCurrentContext(value: unknown): HerdrContext | undefined {
   const result = getRecord(value, "result") ?? value;
   const pane = getRecord(result, "pane");
   const workspaceId = getString(pane, "workspace_id", "workspaceId") ?? extractWorkspaceId(value);
+  const paneId = extractPaneId(value);
   if (!workspaceId) return undefined;
   return {
     workspaceId,
     parentTabId: getString(pane, "tab_id", "tabId"),
+    ...(paneId ? { paneId } : {}),
   };
 }
 
 async function getHerdrContext(client: HerdrClient): Promise<HerdrContext> {
   const workspaceId = process.env.HERDR_WORKSPACE_ID;
   const parentTabId = process.env.HERDR_TAB_ID;
-  if (workspaceId) return { workspaceId, parentTabId };
+  const paneId = process.env.HERDR_PANE_ID;
+  if (workspaceId) return { workspaceId, parentTabId, paneId };
 
   const current = await client.run(["pane", "current", "--current"], { timeout: 5_000 });
   const context = extractCurrentContext(current);
   if (!context) throw new Error("Could not determine the current Herdr workspace.");
-  return context;
+  return { ...context, ...(paneId ? { paneId } : {}) };
 }
 
 function bindingKey(context: HerdrContext, cwd: string): string {
@@ -192,9 +196,9 @@ async function ensureSupportedHerdr(client: HerdrClient): Promise<string> {
   return raw;
 }
 
-async function isLivePane(client: HerdrClient, binding: HerdrBinding): Promise<boolean> {
+async function isLivePane(client: HerdrClient, binding: HerdrBinding, signal?: AbortSignal): Promise<boolean> {
   try {
-    await client.run(["pane", "get", binding.paneId], { timeout: 5_000 });
+    await client.run(["pane", "get", binding.paneId], { timeout: 5_000, signal });
     return true;
   } catch (error) {
     if (isNotFound(error)) return false;
@@ -202,21 +206,49 @@ async function isLivePane(client: HerdrClient, binding: HerdrBinding): Promise<b
   }
 }
 
-async function createPane(
+export async function createPane(
   client: HerdrClient,
   context: HerdrContext,
   cwd: string,
+  signal?: AbortSignal,
 ): Promise<{ paneId: string; workspaceId: string }> {
-  const created = await client.run([
+  const splitArgs = [
     "pane",
     "split",
-    "--current",
+    ...(context.paneId ? ["--pane", context.paneId] : ["--current"]),
     "--direction",
     "right",
     "--cwd",
     cwd,
     "--no-focus",
-  ], { timeout: COMMAND_TIMEOUT_MS });
+  ];
+  let created: unknown;
+  try {
+    created = await client.run(splitArgs, { timeout: COMMAND_TIMEOUT_MS, signal });
+  } catch (error) {
+    if (!context.paneId || !isNotFound(error)) throw error;
+
+    // A stale inherited caller ID should not prevent opening a new pane. The
+    // current-pane fallback is safe here because the request is still issued
+    // from the active Pi/Herdr session.
+    try {
+      created = await client.run([
+        "pane",
+        "split",
+        "--current",
+        "--direction",
+        "right",
+        "--cwd",
+        cwd,
+        "--no-focus",
+      ], { timeout: COMMAND_TIMEOUT_MS, signal });
+    } catch (fallbackError) {
+      throw new AggregateError(
+        [error, fallbackError],
+        `Herdr caller pane ${context.paneId} was unavailable and the current pane fallback failed: ${formatHerdrError(fallbackError)}`,
+      );
+    }
+  }
   const paneId = extractPaneId(created);
   const workspaceId = extractWorkspaceId(created) ?? context.workspaceId;
   if (!paneId) {
@@ -231,7 +263,22 @@ async function waitForShellStartup(signal?: AbortSignal): Promise<void> {
   // this window, so polling output cannot establish readiness. Use a bounded
   // startup grace period before sending the first command.
   if (signal?.aborted) return;
-  await new Promise((resolve) => setTimeout(resolve, SHELL_STARTUP_DELAY_MS));
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timeout = setTimeout(finish, SHELL_STARTUP_DELAY_MS);
+    if (signal?.aborted) {
+      finish();
+      return;
+    }
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 }
 
 async function getOrCreatePane(
@@ -243,10 +290,10 @@ async function getOrCreatePane(
 ): Promise<HerdrBinding> {
   const key = bindingKey(context, cwd);
   const existing = bindings.get(key);
-  if (existing && await isLivePane(client, existing)) return existing;
+  if (existing && await isLivePane(client, existing, signal)) return existing;
   if (existing) bindings.delete(key);
 
-  const created = await createPane(client, context, cwd);
+  const created = await createPane(client, context, cwd, signal);
   await waitForShellStartup(signal);
   const now = new Date().toISOString();
   const binding: HerdrBinding = {
@@ -261,6 +308,49 @@ async function getOrCreatePane(
   bindings.set(key, binding);
   await writePersistedState(bindings);
   return binding;
+}
+
+export async function runPaneCommandWithRecovery(
+  client: HerdrClient,
+  binding: HerdrBinding,
+  command: string,
+  recreate: () => Promise<HerdrBinding>,
+  signal?: AbortSignal,
+): Promise<HerdrBinding> {
+  try {
+    await client.run(["pane", "run", binding.paneId, command], {
+      timeout: COMMAND_TIMEOUT_MS,
+      signal,
+    });
+    return binding;
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+
+    // The pane can disappear after getOrCreatePane() checks it. Recreate the
+    // binding and retry once instead of exposing the stale pane error.
+    let replacement: HerdrBinding;
+    try {
+      replacement = await recreate();
+    } catch (recreateError) {
+      throw new AggregateError(
+        [error, recreateError],
+        `Herdr pane ${binding.paneId} disappeared and could not be recreated: ${formatHerdrError(recreateError)}`,
+      );
+    }
+
+    try {
+      await client.run(["pane", "run", replacement.paneId, command], {
+        timeout: COMMAND_TIMEOUT_MS,
+        signal,
+      });
+      return replacement;
+    } catch (retryError) {
+      throw new AggregateError(
+        [error, retryError],
+        `Herdr pane ${binding.paneId} disappeared; replacement pane ${replacement.paneId} could not run the command: ${formatHerdrError(retryError)}`,
+      );
+    }
+  }
 }
 
 async function closeBinding(
@@ -322,7 +412,7 @@ async function executeAction(
   }
 
   if (input.action === "status" || input.action === "read_output") {
-    if (!existing || !(await isLivePane(client, existing))) {
+    if (!existing || !(await isLivePane(client, existing, signal))) {
       if (existing) {
         bindings.delete(key);
         await writePersistedState(bindings);
@@ -380,11 +470,16 @@ async function executeAction(
     throw new Error("herdr_shell run requires a command. Use open without a command to create an interactive shell tab.");
   }
 
-  const binding = await getOrCreatePane(client, bindings, context, cwd, signal);
+  const initialBinding = await getOrCreatePane(client, bindings, context, cwd, signal);
+  let binding = initialBinding;
   if (input.command) {
-    await client.run(["pane", "run", binding.paneId, input.command], {
-      timeout: COMMAND_TIMEOUT_MS,
-    });
+    binding = await runPaneCommandWithRecovery(client, initialBinding, input.command, async () => {
+      if (bindings.get(initialBinding.key)?.paneId === initialBinding.paneId) {
+        bindings.delete(initialBinding.key);
+        await writePersistedState(bindings);
+      }
+      return getOrCreatePane(client, bindings, context, cwd, signal);
+    }, signal);
     binding.lastCommand = input.command;
     binding.updatedAt = new Date().toISOString();
     await writePersistedState(bindings);

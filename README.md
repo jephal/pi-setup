@@ -224,7 +224,7 @@ herdr_shell({ action: "status" })
 herdr_shell({ action: "close" })
 ```
 
-The integration creates a right-side pane in the current tab with `herdr pane split --current --direction right --no-focus`, then runs the command in that pane. It does not create a new tab or workspace. `read_output` uses `herdr pane read --source recent-unwrapped`, so the model can inspect the same recent output that is visible in Herdr. Output is bounded; it does not wait for a development server to exit.
+The integration creates a right-side pane in the current tab with `herdr pane split --pane <caller> --direction right --no-focus` (falling back to `--current` when needed), then runs the command in that pane. It does not create a new tab or workspace. If the managed pane was closed or disappears while a command is being sent, `open` and `run` automatically create a replacement pane and retry once. `read_output` uses `herdr pane read --source recent-unwrapped`, so the model can inspect the same recent output that is visible in Herdr. Output is bounded; it does not wait for a development server to exit.
 
 Use Pi's built-in `bash` tool for short-lived commands whose stdout/stderr the model needs in the current turn. Use `herdr_shell` for development servers, watchers, log processes, and other commands that should keep running visibly in Herdr. Reload Pi after updating the package:
 
