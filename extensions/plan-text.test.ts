@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
+import { checklistMarkdown, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET } from "./plan-text.ts";
 
 test("plan tool guidance distinguishes full Plan mode plans from outside-mode checklists", () => {
 	assert.match(PLAN_TOOL_DESCRIPTION, /In Plan mode/);
 	assert.match(PLAN_TOOL_DESCRIPTION, /Outside Plan mode/);
+	assert.match(PLAN_TOOL_DESCRIPTION, /decision-first writing/);
 	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /checklists outside Plan mode/);
+	assert.match(PLAN_MODE_WRITING_STYLE, /scope, audience, and conclusion/);
 	assert.ok(PLAN_TOOL_PROMPT_GUIDELINES.some((guideline) => /steps and no full Markdown content/.test(guideline)));
 	assert.ok(PLAN_TOOL_PROMPT_GUIDELINES.some((guideline) => /Enter Plan mode first/.test(guideline)));
 });
