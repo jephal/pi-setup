@@ -16,6 +16,7 @@
   "type": "module",
   "files": [
     "README.md",
+    "install.sh",
     "LICENSE",
     "extensions",
     "src",

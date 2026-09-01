@@ -70,10 +70,30 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
 
 ## Install the complete setup
 
-From GitHub (recommended):
+### One-command Linux bootstrap
+
+This installs Pi through Pi's official installer, installs this package, installs
+Herdr through Herdr's official installer, installs the Fovea `ast-grep` dependency,
+creates `~/notes`, and writes a user-local environment file. It does not use `sudo`
+or modify shell startup files:
 
 ```bash
-pi install git:github.com/jephal/pi-setup@docs/github-only-install
+curl -fsSL https://raw.githubusercontent.com/jephal/pi-setup/main/install.sh | bash
+source ~/.config/pi-setup/env
+pi
+```
+
+The installer is safe to rerun. It preserves an existing
+`~/.config/pi-setup/env` file rather than overwriting it. Neovim remains optional;
+install it separately if you want the notes viewer. Datadog OAuth authentication
+also remains an explicit user step below.
+
+### Install the Pi package only
+
+If Pi and the local dependencies are already installed:
+
+```bash
+pi install git:github.com/jephal/pi-setup@main
 ```
 
 An npm package name is reserved for a future release, but npm publication is not required for this setup.
