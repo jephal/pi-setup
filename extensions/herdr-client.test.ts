@@ -7,6 +7,7 @@ import {
   extractRootPaneId,
   extractTabId,
   HerdrError,
+  isNotFound,
   parseVersion,
   supportsTabShell,
 } from "./herdr-client.ts";
@@ -54,6 +55,22 @@ test("bounds Herdr output by lines and marks the result", () => {
   assert.equal(output.truncation.truncated, true);
   assert.equal(output.truncation.truncatedBy, "lines");
   assert.match(output.text, /Recent output truncated/);
+});
+
+test("recognizes pane and tab not-found error variants", () => {
+  const codes = [
+    "NOT_FOUND",
+    "PANE_GONE",
+    "PANE_NOT_FOUND",
+    "pane_not_found",
+    "TAB_GONE",
+    "tab-not-found",
+  ];
+  for (const code of codes) {
+    assert.equal(isNotFound(new HerdrError("resource is gone", code)), true, code);
+  }
+  assert.equal(isNotFound(new HerdrError("validation failed", "VALIDATION_ERROR")), false);
+  assert.equal(isNotFound(new Error("resource is gone")), false);
 });
 
 test("normalizes Herdr CLI errors", async () => {
