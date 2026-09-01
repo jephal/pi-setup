@@ -7,8 +7,8 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { checklistMarkdown, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
-import { PLAN_TOOLS, restoreActiveTools } from "./approval-tools.ts";
+import { checklistMarkdown, PLAN_MODE_TOOL_ACCESS, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
+import { isPlanModeToolAllowed, PLAN_TOOLS, REVIEW_TOOLS, restoreActiveTools } from "./approval-tools.ts";
 
 const MODES = ["manual", "approve", "auto", "review", "plan"] as const;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -246,6 +246,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	const ownsPlanTool = (globalThis as Record<string, unknown>)[PLAN_TOOL_MARKER] !== "plan";
 	let modeBeforePlan: ApprovalMode = "auto";
 	let toolsBeforePlan: string[] | undefined;
+	let temporaryReadOnlyTools: ReadonlySet<string> | undefined;
 	let latestContext: ExtensionContext | undefined;
 	const approvalFeedback = new Map<string, string>();
 
@@ -397,13 +398,15 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	}
 
 	function restoreTools(): void {
-		if (toolsBeforePlan) pi.setActiveTools(restoreActiveTools(toolsBeforePlan, pi.getActiveTools()));
+		if (toolsBeforePlan) pi.setActiveTools(restoreActiveTools(toolsBeforePlan, pi.getActiveTools(), temporaryReadOnlyTools));
 		toolsBeforePlan = undefined;
+		temporaryReadOnlyTools = undefined;
 	}
 
-	function planToolNames(): string[] {
+	function planToolNames(mode: ApprovalMode): string[] {
 		const available = new Set(pi.getAllTools().map((tool) => tool.name));
-		return [...PLAN_TOOLS].filter((tool) => available.has(tool));
+		const allowed = mode === "plan" ? PLAN_TOOLS : REVIEW_TOOLS;
+		return [...allowed].filter((tool) => available.has(tool));
 	}
 
 	function isReadOnlyMode(value: ApprovalMode): boolean {
@@ -414,12 +417,13 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		const wasReadOnly = isReadOnlyMode(previous);
 		const isReadOnly = isReadOnlyMode(next);
 		if (isReadOnly && !wasReadOnly) {
-			// Take one snapshot when entering the restricted tool policy. Every
-			// read-only mode uses the same safe set until we leave it.
+			// Take one snapshot when entering the restricted tool policy. Plan
+			// mode has the broader non-code-changing set; Review stays conservative.
 			toolsBeforePlan = pi.getActiveTools();
+			temporaryReadOnlyTools = next === "plan" ? PLAN_TOOLS : REVIEW_TOOLS;
 		}
 		if (isReadOnly && !wasReadOnly) {
-			pi.setActiveTools(planToolNames());
+			pi.setActiveTools(planToolNames(next));
 		} else if (wasReadOnly) {
 			restoreTools();
 		}
@@ -528,13 +532,20 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		if (HITL_TOOLS.has(event.toolName) || mode === "auto") return;
 
 		if (isReadOnlyMode(mode)) {
-			if (!PLAN_TOOLS.has(event.toolName)) {
-				return { block: true, reason: "Plan mode is read-only: this tool is disabled." };
+			const allowed = mode === "plan" ? isPlanModeToolAllowed(event.toolName) : REVIEW_TOOLS.has(event.toolName);
+			if (!allowed) {
+				return { block: true, reason: `${MODE_LABELS[mode]} mode is read-only: this tool is disabled.` };
 			}
 			if (event.toolName === "bash") {
 				const command = typeof event.input.command === "string" ? event.input.command : "";
 				if (!isSafePlanBash(command)) {
-					return { block: true, reason: "Plan mode only allows simple read-only bash commands." };
+					return { block: true, reason: `${MODE_LABELS[mode]} mode only allows simple read-only bash commands.` };
+				}
+			}
+			if (mode === "plan" && event.toolName === "herdr_shell" && event.input.action === "run") {
+				const command = typeof event.input.command === "string" ? event.input.command : "";
+				if (!isSafePlanBash(command)) {
+					return { block: true, reason: "Plan mode only allows simple read-only Herdr commands." };
 				}
 			}
 			return;
@@ -596,7 +607,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			approve: "Read tools, edit, and write may run directly. Every bash call requires user approval. ask_questions is already human-in-the-loop and is not gated twice.",
 			auto: "Tools may run without an approval prompt.",
 			review: "You are in read-only review mode. Do not edit or write files. Inspect and explain the code, and create a review plan when useful, but do not make changes.",
-			plan: "You are in read-only plan mode. Do not edit or write files. Use only safe inspection tools and simple read-only bash commands.",
+			plan: `You are in read-only Plan mode for project code. ${PLAN_MODE_TOOL_ACCESS}`,
 		};
 		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n`;
 		content += mode === "plan"

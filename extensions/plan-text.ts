@@ -2,6 +2,9 @@
 export const PLAN_MODE_WRITING_STYLE =
 	"Full Plan mode plans use decision-first writing: start with `## In short` stating scope, audience, and conclusion plus 3–5 key decisions; follow with `## What happens next`; then cover concise reasoning, alternatives and consequences, trade-offs, and risks; end with the next decision. Use short sections and progressive disclosure, not a wall of text.";
 
+export const PLAN_MODE_TOOL_ACCESS =
+	"Plan mode allows non-code-changing context tools such as notes, memory, Fovea, Herdr inspection, Datadog investigation, scheduled tasks, and safe read-only shell commands. Do not edit project code or use unsafe shell commands.";
+
 export const PLAN_UPDATE_RESPONSE_GUIDANCE =
 	"After updating an existing plan, do not continue silently: explain to the user what changed, why it changed, and the consequence or next step.";
 
@@ -14,6 +17,7 @@ export const PLAN_TOOL_PROMPT_SNIPPET =
 export const PLAN_TOOL_PROMPT_GUIDELINES = [
 	"In Plan mode, use create/update for substantial multi-step work with full Markdown, then wait for the review selector before execution.",
 	PLAN_MODE_WRITING_STYLE,
+	PLAN_MODE_TOOL_ACCESS,
 	PLAN_UPDATE_RESPONSE_GUIDANCE,
 	"Outside Plan mode, use create/update only for a short checklist for a small task; provide steps and no full Markdown content.",
 	"Do not use the outside-Plan-mode checklist as a substitute for planning a substantial task. Enter Plan mode first.",
