@@ -1,8 +1,9 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { createHash } from "node:crypto";
-import { lstat, unlink } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import net from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NotesVault, MAX_NOTE_BYTES, type NotesSearchMode, type NotesTransferAction, type NotesWriteMode } from "../src/notes/vault.ts";
@@ -109,51 +110,217 @@ async function isNvimLive(pi: ExtensionAPI, socket: string): Promise<boolean> {
 	}
 }
 
-async function removeStaleSocket(socket: string): Promise<void> {
+type SocketProbe = "live" | "dead" | "unknown";
+
+/**
+ * A remote Neovim expression can time out while the server is healthy (for
+ * example while its UI is busy). Socket reachability is therefore the only
+ * authority used before deleting a stale pathname.
+ */
+export async function probeNotesSocket(socketPath: string, timeoutMs = 500): Promise<SocketProbe> {
+	return new Promise((resolve) => {
+		let settled = false;
+		let timer: NodeJS.Timeout | undefined;
+		const socket = net.createConnection({ path: socketPath });
+		const finish = (result: SocketProbe) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			socket.removeAllListeners();
+			socket.destroy();
+			resolve(result);
+		};
+		timer = setTimeout(() => finish("unknown"), timeoutMs);
+		timer.unref();
+		socket.unref();
+		socket.once("connect", () => finish("live"));
+		socket.once("error", (error: NodeJS.ErrnoException) => {
+			// Only connection outcomes which establish that no server accepted the
+			// endpoint are safe to unlink. Permissions and all other errors retain
+			// the pathname for a human or a later attempt to inspect.
+			finish(error.code === "ENOENT" || error.code === "ECONNREFUSED" || error.code === "ECONNRESET" ? "dead" : "unknown");
+		});
+	});
+}
+
+export async function removeStaleSocket(socket: string): Promise<void> {
+	let entry;
+	try { entry = await lstat(socket); }
+	catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return;
+		return; // Permission and unknown filesystem failures are conservative.
+	}
+	if (!entry.isSocket()) return;
+	// Do not unlink another local user's socket even in a shared runtime dir.
+	if (typeof process.getuid === "function" && entry.uid !== process.getuid()) return;
+	if (await probeNotesSocket(socket) !== "dead") return;
+	try { await unlink(socket); }
+	catch { /* The server may have replaced or removed it after the probe. */ }
+}
+
+async function remoteNvimExpr(pi: ExtensionAPI, socket: string, expression: string, action: string): Promise<string> {
 	try {
-		const entry = await lstat(socket);
-		if (entry.isSocket()) await unlink(socket);
-	} catch {
-		// The socket does not exist or disappeared between checks.
+		const result = await runNvim(pi, ["--server", socket, "--remote-expr", expression]);
+		return result.stdout.trim();
+	} catch (error) {
+		throw new Error(`Neovim ${action} failed: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }
 
-async function refreshNvim(pi: ExtensionAPI, root: string): Promise<{ refreshed: boolean; socket: string }> {
+async function refreshNvim(pi: ExtensionAPI, root: string): Promise<{ refreshed: boolean; socket: string; conflict?: "dirty"; message?: string }> {
 	const socket = nvimSocket(root);
 	if (!await isNvimLive(pi, socket)) return { refreshed: false, socket };
-	await runNvim(pi, ["--server", socket, "--remote-send", "<C-\\><C-N>:checktime<CR>"]);
+	// Do not call checktime against a dirty human buffer. For a clean buffer,
+	// schedule it in Neovim so this RPC returns promptly; checktime itself still
+	// preserves edits if the buffer becomes modified before it runs.
+	const status = await remoteNvimExpr(pi, socket, "luaeval(\"pi_notes_refresh()\")", "refresh");
+	if (status === "dirty") return { refreshed: false, socket, conflict: "dirty" };
+	if (status !== "scheduled") throw new Error(`Neovim refresh failed: ${status || "unexpected response"}`);
 	return { refreshed: true, socket };
 }
 
-async function openViewerInHerdr(pi: ExtensionAPI, readOnly: boolean) {
-	const root = await configuredNotes().getRoot();
-	const socket = nvimSocket(root);
-	if (await isNvimLive(pi, socket)) return textResult(`Neovim is already open for ${root}.`, { opened: true, root, socket, alreadyOpen: true });
-	await removeStaleSocket(socket);
-	const command = viewerCommand(root, socket, readOnly);
-	const herdrToolAvailable = typeof pi.getAllTools === "function" && pi.getAllTools().some((tool) => tool.name === "herdr_shell");
-	if (process.env.HERDR_ENV !== "1" || !herdrToolAvailable) {
-		return textResult(`Herdr is unavailable in this Pi session. Run this in a VM terminal instead:\n${command}`, { opened: false, root, command });
-	}
+async function saveNvim(pi: ExtensionAPI, socket: string): Promise<void> {
+	const status = await remoteNvimExpr(pi, socket, "luaeval(\"pi_notes_save()\")", "save");
+	if (status === "saved") return;
+	if (status === "read_only") throw new Error("Neovim save was not performed because the current buffer is read-only.");
+	if (status === "not_saved") throw new Error("Neovim did not save the current buffer; its edits remain unsaved.");
+	throw new Error(`Neovim save failed: ${status || "unexpected response"}`);
+}
 
-	const result = await new Promise<{ ok: boolean; error?: string }>((resolveResult) => {
+async function viewerLockOwnerIsAlive(pid: unknown): Promise<boolean> {
+	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
+	try { process.kill(pid, 0); return true; }
+	catch (error) { return !(typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH"); }
+}
+
+/** Detach before removal so a newly acquired lock is never recursively removed. */
+async function reclaimViewerLock(lock: string): Promise<void> {
+	const detached = `${lock}.stale-${process.pid}-${randomUUID()}`;
+	try { await rename(lock, detached); }
+	catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return;
+		throw error;
+	}
+	await rm(detached, { recursive: true, force: true });
+}
+
+async function staleViewerLock(lock: string): Promise<boolean> {
+	try {
+		const entry = await lstat(lock);
+		if (!entry.isDirectory() || Date.now() - entry.mtimeMs <= 30_000) return false;
+		try {
+			const owner = JSON.parse(await readFile(`${lock}/owner.json`, "utf8")) as { pid?: unknown; createdAt?: unknown };
+			const createdAt = typeof owner.createdAt === "number" ? owner.createdAt : entry.mtimeMs;
+			return Date.now() - createdAt > 30_000 && !await viewerLockOwnerIsAlive(owner.pid);
+		} catch (error) {
+			// An incomplete abandoned lock can be recovered; permission failures
+			// cannot establish ownership loss and must remain untouched.
+			if (typeof error === "object" && error !== null && "code" in error && (error.code === "EACCES" || error.code === "EPERM")) return false;
+			return true;
+		}
+	} catch { return false; }
+}
+
+export async function acquireViewerLock(socket: string, signal?: AbortSignal): Promise<() => Promise<void>> {
+	const lock = `${socket}.launch`;
+	const deadline = Date.now() + 12_000;
+	while (true) {
+		if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Notes viewer request was cancelled.");
+		try {
+			await mkdir(lock, { mode: 0o700 });
+			const token = randomUUID();
+			const ownerPath = `${lock}/owner.json`;
+			try { await writeFile(ownerPath, JSON.stringify({ pid: process.pid, createdAt: Date.now(), token }), { mode: 0o600 }); }
+			catch (error) {
+				await unlink(ownerPath).catch(() => undefined);
+				await rmdir(lock).catch(() => undefined);
+				throw error;
+			}
+			return async () => {
+				const detached = `${lock}.release-${token}`;
+				try { await rename(lock, detached); }
+				catch { return; }
+				try {
+					const owner = JSON.parse(await readFile(`${detached}/owner.json`, "utf8")) as { token?: unknown };
+					if (owner.token !== token) {
+						// A replacement won the race before the detach. Put it back only
+						// if another launcher has not already created a newer lock.
+						await rename(detached, lock).catch(() => undefined);
+						return;
+					}
+					await unlink(`${detached}/owner.json`);
+					// These operations affect only our detached directory and are
+					// non-recursive, so no recreated lock can be deleted.
+					await rmdir(detached);
+				} catch { /* reclaimed, replaced, or still in use: never delete recursively */ }
+			};
+		} catch (error) {
+			if (!(typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST")) throw error;
+			if (await staleViewerLock(lock)) await reclaimViewerLock(lock);
+			if (Date.now() >= deadline) throw new Error("Timed out waiting for another Notes viewer launch.");
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(done, 100);
+				const abort = () => done(signal?.reason instanceof Error ? signal.reason : new Error("Notes viewer request was cancelled."));
+				function done(reason?: Error) { clearTimeout(timer); signal?.removeEventListener("abort", abort); if (reason) reject(reason); else resolve(); }
+				if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
+			});
+		}
+	}
+}
+
+async function requestNotesViewer(pi: ExtensionAPI, root: string, socket: string, command: string | undefined, signal?: AbortSignal) {
+	return new Promise<{ ok: boolean; error?: string; binding?: Record<string, unknown>; existing?: boolean }>((resolveResult) => {
+		const controller = new AbortController();
 		let settled = false;
-		const finish = (value: { ok: boolean; error?: string }) => {
+		const abort = () => {
+			controller.abort(signal?.reason);
+			finish({ ok: false, error: "Notes viewer request was cancelled." });
+		};
+		const finish = (value: { ok: boolean; error?: string; binding?: Record<string, unknown>; existing?: boolean }) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timeout);
+			signal?.removeEventListener("abort", abort);
 			resolveResult(value);
 		};
-		const timeout = setTimeout(() => finish({ ok: false, error: "Timed out waiting for the Herdr pane manager." }), 20_000);
-		try {
-			pi.events.emit("herdr:open-command", { command, cwd: root, respond: finish });
-		} catch (error) {
-			finish({ ok: false, error: error instanceof Error ? error.message : String(error) });
-		}
+		const timeout = setTimeout(() => {
+			controller.abort(new Error("Timed out waiting for the Herdr pane manager."));
+			finish({ ok: false, error: "Timed out waiting for the Herdr pane manager." });
+		}, 20_000);
+		timeout.unref();
+		if (signal?.aborted) { abort(); finish({ ok: false, error: "Notes viewer request was cancelled." }); return; }
+		signal?.addEventListener("abort", abort, { once: true });
+		try { pi.events.emit("herdr:open-command", { role: "notes-viewer", command, cwd: root, socket, signal: controller.signal, respond: finish }); }
+		catch (error) { controller.abort(error); finish({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
 	});
+}
 
-	if (!result.ok) return textResult(`Could not open the Herdr pane: ${result.error ?? "unknown error"}\nRun this in a VM terminal instead:\n${command}`, { opened: false, root, command, error: result.error });
-	return textResult(`Opened Neovim in a right-side Herdr pane for ${root}.`, { opened: true, root, socket, command });
+async function openViewerInHerdr(pi: ExtensionAPI, readOnly: boolean, signal?: AbortSignal) {
+	const root = await configuredNotes().getRoot();
+	const socket = nvimSocket(root);
+	const command = viewerCommand(root, socket, readOnly);
+	const herdrToolAvailable = typeof pi.getAllTools === "function" && pi.getAllTools().some((tool) => tool.name === "herdr_shell");
+	if (process.env.HERDR_ENV !== "1" || !herdrToolAvailable) return textResult(`Herdr is unavailable in this Pi session. Run this in a VM terminal instead:\n${command}`, { opened: false, root, command });
+
+	// Ask the separate notes ownership path to locate a live viewer even when it
+	// was opened from another Pi session, workspace, or tab.
+	if (await isNvimLive(pi, socket)) {
+		const located = await requestNotesViewer(pi, root, socket, undefined, signal);
+		if (located.ok) return textResult(`Neovim is already open for ${root}.`, { opened: true, root, socket, alreadyOpen: true, binding: located.binding, existing: located.existing });
+		return textResult(`Neovim is already open for ${root}, but its Herdr location could not be confirmed: ${located.error ?? "unknown error"}.`, { opened: true, root, socket, alreadyOpen: true, error: located.error });
+	}
+	const release = await acquireViewerLock(socket, signal);
+	try {
+		if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Notes viewer request was cancelled.");
+		if (await isNvimLive(pi, socket)) {
+			const located = await requestNotesViewer(pi, root, socket, undefined, signal);
+			return textResult(`Neovim is already open for ${root}.`, { opened: true, root, socket, alreadyOpen: true, binding: located.binding });
+		}
+		await removeStaleSocket(socket);
+		const result = await requestNotesViewer(pi, root, socket, command, signal);
+		if (!result.ok) return textResult(`Could not open the Herdr pane: ${result.error ?? "unknown error"}\nRun this in a VM terminal instead:\n${command}`, { opened: false, root, command, error: result.error });
+		return textResult(`Opened Neovim in Herdr pane ${String(result.binding?.paneId ?? "unknown")} for ${root}.`, { opened: true, root, socket, command, binding: result.binding, existing: result.existing });
+	} finally { await release(); }
 }
 
 async function runGit(pi: ExtensionAPI, root: string, args: string[], timeout = 15_000) {
@@ -197,7 +364,7 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	// Keep administration-only tools out of the default prompt. This is applied
 	// once per session; the small loader only adds a requested capability.
 	pi.on("session_start", () => {
-		const optional = new Set(Object.values(OPTIONAL_ADMIN_TOOLS));
+		const optional = new Set<string>(Object.values(OPTIONAL_ADMIN_TOOLS));
 		const activeTools = pi.getActiveTools();
 		const reduced = activeTools.filter((name) => !optional.has(name));
 		if (reduced.length !== activeTools.length) pi.setActiveTools(reduced);
@@ -292,8 +459,8 @@ export default function notesExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Open notes in a Herdr-side Neovim pane",
 		promptGuidelines: ["Use when the user wants to browse or edit notes alongside Pi."],
 		parameters: openViewerParameters,
-		async execute(_toolCallId, params) {
-			return openViewerInHerdr(pi, params.readOnly === true);
+		async execute(_toolCallId, params, signal) {
+			return openViewerInHerdr(pi, params.readOnly === true, signal);
 		},
 	});
 
@@ -339,7 +506,12 @@ export default function notesExtension(pi: ExtensionAPI): void {
 		async execute() {
 			const root = await configuredNotes().getRoot();
 			const result = await refreshNvim(pi, root);
-			return textResult(result.refreshed ? "Neovim refreshed changed files." : "Neovim is not running. Use notes_open_viewer first.", result);
+			const text = result.refreshed
+				? "Neovim scheduled a safe check for changed files."
+				: result.conflict === "dirty"
+					? "Neovim did not refresh because the current buffer has unsaved edits; those edits were preserved."
+					: "Neovim is not running. Use notes_open_viewer first.";
+			return textResult(text, result);
 		},
 	});
 
@@ -352,7 +524,7 @@ export default function notesExtension(pi: ExtensionAPI): void {
 			const root = await configuredNotes().getRoot();
 			const socket = nvimSocket(root);
 			if (!await isNvimLive(pi, socket)) throw new Error("Neovim is not running. Use notes_open_viewer first.");
-			await runNvim(pi, ["--server", socket, "--remote-send", "<C-\\><C-N>:update<CR>"]);
+			await saveNvim(pi, socket);
 			return textResult("Saved the current Neovim buffer.", { saved: true, socket });
 		},
 	});

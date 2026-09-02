@@ -46,8 +46,9 @@ function parseMode(value: string): ApprovalMode | undefined {
 }
 
 function summarizeTool(toolName: string, input: Record<string, unknown>): string {
-	if (toolName === "bash" && typeof input.command === "string") {
-		return input.command.length > 500 ? `${input.command.slice(0, 497)}...` : input.command;
+	if ((toolName === "bash" || toolName === "herdr_shell") && typeof input.command === "string") {
+		const command = input.command.length > 500 ? `${input.command.slice(0, 497)}...` : input.command;
+		return toolName === "herdr_shell" ? `Persistent Herdr pane command: ${command}` : command;
 	}
 	try {
 		const json = JSON.stringify(input);
@@ -213,6 +214,12 @@ function reviewOptions() {
 function explainToolCall(toolName: string, input: Record<string, unknown>): string {
 	const path = inputString(input, "path", "filePath", "cwd") ?? "the project";
 	if (toolName === "bash") return "The model wants to run a shell command. Review it before allowing execution.";
+	if (toolName === "herdr_shell") {
+		const action = inputString(input, "action") ?? "open";
+		return action === "run" || action === "open"
+			? "The model wants to start a command in a persistent visible Herdr pane. Review the command because it may keep running after this turn."
+			: `The model wants to ${action.replaceAll("_", " ")} a managed Herdr pane.`;
+	}
 	if (toolName === "read") return `The model wants to read ${path}.`;
 	if (toolName === "write") return `The model wants to write or replace ${path}.`;
 	if (toolName === "edit") return `The model wants to modify ${path}.`;
@@ -535,7 +542,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const needsApproval = mode === "manual" || (mode === "approve" && event.toolName === "bash");
+		const isHerdrShellCommand = event.toolName === "herdr_shell" && (event.input.action === "open" || event.input.action === "run");
+		const needsApproval = mode === "manual" || (mode === "approve" && (event.toolName === "bash" || isHerdrShellCommand));
 		if (!needsApproval) return;
 		if (!ctx.hasUI) {
 			return { block: true, reason: `Approval mode ${MODE_LABELS[mode]} requires interactive confirmation.` };

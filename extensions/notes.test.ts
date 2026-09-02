@@ -1,12 +1,47 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ensureFrontmatter } from "../src/notes/frontmatter.ts";
 import { NotesVault } from "../src/notes/vault.ts";
-import notesExtension from "./notes.ts";
+import notesExtension, { acquireViewerLock, removeStaleSocket } from "./notes.ts";
+
+test("stale socket cleanup retains a reachable server after a remote expression timeout", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-notes-socket-"));
+	const socket = join(directory, "viewer.sock");
+	const server = createServer((connection) => connection.destroy());
+	try {
+		await new Promise<void>((resolve, reject) => server.once("error", reject).listen(socket, resolve));
+		// isNvimLive can report false when `nvim --remote-expr` times out. The
+		// pathname must still remain because a server accepted a direct probe.
+		await removeStaleSocket(socket);
+		assert.equal((await lstat(socket)).isSocket(), true);
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+test("viewer launch-lock release requires its owner token", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-notes-lock-"));
+	const socket = join(directory, "viewer.sock");
+	const lock = `${socket}.launch`;
+	try {
+		const release = await acquireViewerLock(socket);
+		// Simulate a stale owner releasing after another launcher recreated the
+		// same lock path. The old release must not remove the replacement.
+		await rename(lock, `${lock}.old`);
+		await mkdir(lock);
+		await writeFile(join(lock, "owner.json"), JSON.stringify({ token: "another-launcher" }));
+		await release();
+		assert.equal((await lstat(lock)).isDirectory(), true);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
 
 test("registers the agent-first Notes tool surface", () => {
 	const tools: string[] = [];
@@ -62,6 +97,66 @@ test("returns a direct VM command when Herdr is unavailable", async () => {
 		assert.match(result.content[0].text, /src\/notes\/nvim-init\.lua/);
 		assert.match(result.content[0].text, /--listen/);
 		assert.match(result.content[0].text, /--clean/);
+	} finally {
+		if (previousVault === undefined) delete process.env.NOTES_PATH;
+		else process.env.NOTES_PATH = previousVault;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("notes refresh and save use acknowledged remote expressions rather than fire-and-forget input", async () => {
+	const root = await makeVault();
+	const previousVault = process.env.NOTES_PATH;
+	try {
+		process.env.NOTES_PATH = root;
+		const calls: string[][] = [];
+		const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+		const fakePi = {
+			registerTool(definition: { name: string; execute: (...args: any[]) => Promise<any> }) { definitions.push(definition); },
+			registerCommand() {}, on() {},
+			async exec(_binary: string, args: string[]) {
+				calls.push(args);
+				const expression = args[args.indexOf("--remote-expr") + 1] ?? "";
+				return { code: 0, stdout: expression.includes("pi_notes_refresh") ? "scheduled\n" : expression.includes("pi_notes_save") ? "saved\n" : "1\n", stderr: "" };
+			},
+		};
+		notesExtension(fakePi as unknown as ExtensionAPI);
+		const refresh = definitions.find((definition) => definition.name === "notes_refresh")!;
+		const save = definitions.find((definition) => definition.name === "notes_save")!;
+		assert.equal((await refresh.execute("test", {})).details.refreshed, true);
+		assert.equal((await save.execute("test", {})).details.saved, true);
+		assert.ok(calls.some((args) => args.includes("--remote-expr") && args.some((part) => part.includes("pi_notes_refresh"))));
+		assert.ok(calls.some((args) => args.includes("--remote-expr") && args.some((part) => part.includes("pi_notes_save"))));
+		assert.equal(calls.some((args) => args.includes("--remote-send")), false);
+	} finally {
+		if (previousVault === undefined) delete process.env.NOTES_PATH;
+		else process.env.NOTES_PATH = previousVault;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("notes refresh and save do not claim success for dirty or read-only conflicts", async () => {
+	const root = await makeVault();
+	const previousVault = process.env.NOTES_PATH;
+	try {
+		process.env.NOTES_PATH = root;
+		const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+		const fakePi = {
+			registerTool(definition: { name: string; execute: (...args: any[]) => Promise<any> }) { definitions.push(definition); },
+			registerCommand() {}, on() {},
+			async exec(_binary: string, args: string[]) {
+				const expression = args[args.indexOf("--remote-expr") + 1] ?? "";
+				return { code: 0, stdout: expression.includes("pi_notes_refresh") ? "dirty\n" : expression.includes("pi_notes_save") ? "read_only\n" : "1\n", stderr: "" };
+			},
+		};
+		notesExtension(fakePi as unknown as ExtensionAPI);
+		const refresh = definitions.find((definition) => definition.name === "notes_refresh")!;
+		const save = definitions.find((definition) => definition.name === "notes_save")!;
+		const result = await refresh.execute("test", {});
+		assert.equal(result.details.refreshed, false);
+		assert.equal(result.details.conflict, "dirty");
+		assert.match(result.content[0].text, /did not refresh/);
+		await assert.rejects(save.execute("test", {}), /read-only/);
 	} finally {
 		if (previousVault === undefined) delete process.env.NOTES_PATH;
 		else process.env.NOTES_PATH = previousVault;
