@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import { checklistMarkdown, PLAN_MODE_TOOL_ACCESS, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
 import { isPlanModeToolAllowed, isSafePlanBash, PLAN_TOOLS, readOnlyToolNames, REVIEW_TOOLS, restoreActiveTools } from "./approval-tools.ts";
+import { withHerdrBlock } from "./herdr-blocking.ts";
 
 const MODES = ["manual", "approve", "auto", "review", "plan"] as const;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -323,19 +324,19 @@ export default function approvalModes(pi: ExtensionAPI): void {
 					if (mode === "plan" && params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
 					return { content: [{ type: "text", text: `Saved plan to ${filePath}.` }], details: { plan } };
 				}
-				const review = await ctx.ui.custom<{ key: string; edit?: string } | null>(
+				const review = await withHerdrBlock(pi, "Waiting for plan review", () => ctx.ui.custom<{ key: string; edit?: string } | null>(
 					(tui, theme, _keybindings, done) => createEditableOptionsComponent(tui, theme, done, {
 						title: `Review plan · ${plan.name}`,
 						options: reviewOptions(),
 						initialFocus: "options",
 					}),
-				);
+				));
 				if (!review) {
 					if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
 					return { content: [{ type: "text", text: `Plan saved to ${filePath}. Review cancelled; remaining in Plan mode.` }], details: { plan, cancelled: true } };
 				}
 				if (review.key === "edit-plan") {
-					const edited = await ctx.ui.editor("Edit plan", plan.content);
+					const edited = await withHerdrBlock(pi, "Waiting for plan edits", () => ctx.ui.editor("Edit plan", plan.content));
 					if (edited?.trim()) { plan = { ...plan, content: edited, updatedAt: new Date().toISOString() }; }
 					continue;
 				}
@@ -556,7 +557,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			humanReadableExplanation: explainToolCall(event.toolName, event.input),
 		};
 		const description = summarizeTool(event.toolName, event.input);
-		const result = await ctx.ui.custom<{ key: string; edit?: string } | null>(
+		const result = await withHerdrBlock(pi, "Waiting for approval", () => ctx.ui.custom<{ key: string; edit?: string } | null>(
 			(tui, theme, _keybindings, done) => createEditableOptionsComponent(tui, theme, done, {
 				title: approvalInput.humanReadableExplanation,
 				details: [`  ${description}`],
@@ -568,7 +569,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				optionsHint: "↑↓ choose · Tab edit feedback · Enter confirm · Esc cancel",
 				editingHint: "Tab save · Enter approve/deny · arrows stop editing · Esc cancel",
 			}),
-		);
+		));
 		if (!result) return { block: true, reason: `Blocked by ${MODE_LABELS[mode]} approval gate.` };
 		const approved = result.key === "yes";
 		if (!approved) {

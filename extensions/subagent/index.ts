@@ -31,6 +31,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { withHerdrBlock } from "../herdr-blocking.ts";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 import {
 	createMcpForwardingBridge,
@@ -732,10 +733,10 @@ export default function (pi: ExtensionAPI) {
 				if (projectAgentsRequested.length > 0) {
 					const names = projectAgentsRequested.map((a) => a.name).join(", ");
 					const dir = discovery.projectAgentsDir ?? "(unknown)";
-					const ok = await ctx.ui.confirm(
+					const ok = await withHerdrBlock(pi, "Waiting for project-agent approval", () => ctx.ui.confirm(
 						"Run project-local agents?",
 						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-					);
+					));
 					if (!ok)
 						return {
 							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],

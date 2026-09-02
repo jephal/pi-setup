@@ -7,6 +7,7 @@ import { MemoryStore } from "../src/memory/db.ts";
 import { MemoryOperationQueue } from "../src/memory/operation-queue.ts";
 import { isMeaningfullyRelevant } from "../src/memory/ranking.ts";
 import type { MemoryCategory, MemoryScope, MemorySearchResult } from "../src/memory/types.ts";
+import { withHerdrBlock } from "./herdr-blocking.ts";
 
 const memoryDir = () => join(getAgentDir(), "memory");
 const databasePath = () => join(memoryDir(), "memory.sqlite");
@@ -189,8 +190,11 @@ function registerMemoryTools(pi: ExtensionAPI): void {
 				}
 				case "delete": {
 					if (!params.id) throw new Error("The delete action requires id");
-					if (ctx.hasUI && !(await ctx.ui.confirm("Delete memory?", `Permanently delete ${params.id}?`))) {
-						return { content: [{ type: "text", text: "Memory deletion cancelled." }], details: { action, deleted: false } };
+					if (ctx.hasUI) {
+						const confirmed = await withHerdrBlock(pi, "Waiting for memory deletion confirmation", () => ctx.ui.confirm("Delete memory?", `Permanently delete ${params.id}?`));
+						if (!confirmed) {
+							return { content: [{ type: "text", text: "Memory deletion cancelled." }], details: { action, deleted: false } };
+						}
 					}
 					const deleted = await withStore((store) => store.delete(params.id!));
 					return { content: [{ type: "text", text: deleted ? `Deleted memory ${params.id}.` : `Memory ${params.id} not found.` }], details: { action, deleted, id: params.id } };

@@ -4,6 +4,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { OTHER_OPTION_LABEL, createEditableOptionsComponent } from "../src/pi-ui/index.js";
+import { withHerdrBlock } from "./herdr-blocking.ts";
 import { Type } from "typebox";
 import { checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
 import {
@@ -222,19 +223,19 @@ export default function planMode(pi: ExtensionAPI): void {
 			}
 			if (ctx.hasUI && currentMode === "plan") {
 				for (;;) {
-					const review = await ctx.ui.custom<{ key: string; edit?: string } | null>(
+					const review = await withHerdrBlock(pi, "Waiting for plan review", () => ctx.ui.custom<{ key: string; edit?: string } | null>(
 						(tui, theme, _keybindings, done) => createEditableOptionsComponent(tui, theme, done, {
 							title: `Review plan · ${plan.name}`,
 							options: reviewOptions(),
 							initialFocus: "options",
 						}),
-					);
+					));
 					if (!review) {
 						if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
 						return { content: [{ type: "text", text: `Plan saved to ${filePath}. Review cancelled; remaining in Plan mode.` }], details: { plan, cancelled: true } };
 					}
 					if (review.key === "edit-plan") {
-						const edited = await ctx.ui.editor("Edit plan", plan.content);
+						const edited = await withHerdrBlock(pi, "Waiting for plan edits", () => ctx.ui.editor("Edit plan", plan.content));
 						if (edited?.trim()) {
 							plan.content = edited;
 							plan.updatedAt = new Date().toISOString();
