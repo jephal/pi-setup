@@ -4,6 +4,7 @@ export const MODEL_TIERS = ["fast", "medium", "complex"] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
 export type ModelResolutionSource = "tier" | "agent" | "parent" | "none";
+export type AvailableModel = { provider: string; id: string };
 
 export interface ResolvedAgentModel {
 	model?: string;
@@ -44,10 +45,15 @@ export function resolveAgentModel(
 	agent: { name?: string; model?: string; modelTier?: ModelTier },
 	parent: { provider?: string; id?: string },
 	overrideTier?: ModelTier,
+	availableModels?: readonly AvailableModel[],
 ): ResolvedAgentModel {
 	const tier = overrideTier ?? agent.modelTier;
 	if (tier) {
-		return { model: modelRoute(agent.name ?? "", tier), tier, source: "tier" };
+		const routedModel = modelRoute(agent.name ?? "", tier);
+		const routeIsAvailable = !availableModels || availableModels.some((model) => `${model.provider}/${model.id}` === routedModel);
+		if (routeIsAvailable) return { model: routedModel, tier, source: "tier" };
+		if (parent.provider && parent.id) return { model: `${parent.provider}/${parent.id}`, tier, source: "parent" };
+		return { model: routedModel, tier, source: "tier" };
 	}
 	if (agent.model) return { model: agent.model, source: "agent" };
 	if (parent.provider && parent.id) return { model: `${parent.provider}/${parent.id}`, source: "parent" };

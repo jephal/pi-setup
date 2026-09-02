@@ -291,11 +291,12 @@ export function unsupportedChildToolNames(agent: AgentConfig): string[] {
 /** Builds child CLI arguments while retaining legacy parent model and thinking defaults. */
 export function buildChildArgs(
 	agent: Pick<AgentConfig, "model"> & Partial<Pick<AgentConfig, "name" | "modelTier">>,
-	parentCtx: Pick<ExtensionContext, "model" | "thinkingLevel">,
+	parentCtx: Pick<ExtensionContext, "model" | "thinkingLevel" | "modelRegistry">,
 	overrideTier?: ModelTier,
 ): string[] {
 	const args = ["--mode", "json", "-p", "--no-session"];
-	const resolved = resolveAgentModel(agent, parentCtx.model ?? {}, overrideTier);
+	const availableModels = parentCtx.modelRegistry?.getAvailable().map((model) => ({ provider: model.provider, id: model.id }));
+	const resolved = resolveAgentModel(agent, parentCtx.model ?? {}, overrideTier, availableModels);
 	if (resolved.model) {
 		args.push("--model", resolved.model);
 		if (resolved.source === "parent" && parentCtx.thinkingLevel) args.push("--thinking", parentCtx.thinkingLevel);
@@ -920,7 +921,8 @@ export default function (pi: ExtensionAPI) {
 				let promptPath: string | undefined;
 				try {
 					if (forwardingProvider) forwardingBridge = await createMcpForwardingBridge(forwardingProvider, ctx, undefined);
-					const resolved = resolveAgentModel(agent, ctx.model ?? {}, params.modelTier);
+					const availableModels = ctx.modelRegistry.getAvailable().map((model) => ({ provider: model.provider, id: model.id }));
+					const resolved = resolveAgentModel(agent, ctx.model ?? {}, params.modelTier, availableModels);
 					const childArgs = ["--mode", "rpc", "--no-session"];
 					if (resolved.model) {
 						childArgs.push("--model", resolved.model);
