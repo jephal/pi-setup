@@ -17,7 +17,13 @@ test("subagent tool contract lists the bundled agent names", () => {
 		assert.match(definition.parameters.properties.agent.description, new RegExp(name));
 	}
 	assert.ok(definition.parameters.properties.modelTier);
+	assert.ok(definition.parameters.properties.background);
+	assert.match(definition.description, /run in the background by default/);
+	assert.match(definition.description, /background: false/);
 	assert.match(definition.parameters.properties.modelTier.description, /medium by default/);
+	for (const name of ["get_subagent_status", "get_subagent_result", "send_subagent_message", "cancel_subagent"]) {
+		assert.ok(registered.some((tool) => tool.name === name), `missing ${name}`);
+	}
 	assert.match(definition.parameters.properties.modelTier.description, /complex only/);
 });
 

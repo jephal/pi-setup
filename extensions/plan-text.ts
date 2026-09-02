@@ -1,4 +1,7 @@
 /** Shared model-facing plan text for the primary extension and its standalone fallback. */
+export const PLAN_MODE_RESEARCH_GATE =
+	"Use Plan mode only after read-only research and discovery are complete enough to make a decision. The saved plan is the final decision and execution contract, not an initial research log, evidence dump, or unresolved question list. If material uncertainty remains, continue research or ask a focused question before creating the plan.";
+
 export const PLAN_MODE_WRITING_STYLE =
 	"Full Plan mode plans use decision-first writing: start with `## In short` stating scope, audience, and conclusion plus 3–5 key decisions; follow with `## What happens next`; then cover concise reasoning, alternatives and consequences, trade-offs, and risks; end with the next decision. Use short sections and progressive disclosure, not a wall of text.";
 
@@ -9,13 +12,14 @@ export const PLAN_UPDATE_RESPONSE_GUIDANCE =
 	"After updating an existing plan, do not continue silently: explain to the user what changed, why it changed, and the consequence or next step.";
 
 export const PLAN_TOOL_DESCRIPTION =
-	`Mode-sensitive planning tool. In Plan mode, create and refine a full Markdown implementation plan with review and execution checkpoints. Outside Plan mode, create or update only a small-task checklist; do not use it to plan substantial work. Inspect or clear the current branch plan in either mode. ${PLAN_MODE_WRITING_STYLE}`;
+	`Mode-sensitive planning tool. In Plan mode, create and refine a full Markdown implementation plan with review and execution checkpoints. Outside Plan mode, create or update only a small-task checklist; do not use it to plan substantial work. Inspect or clear the current branch plan in either mode. ${PLAN_MODE_RESEARCH_GATE} ${PLAN_MODE_WRITING_STYLE}`;
 
 export const PLAN_TOOL_PROMPT_SNIPPET =
-	"Use full plans in Plan mode; use only small checklists outside Plan mode";
+	"Research first, then use Plan mode for the final decision and execution contract; use only small checklists outside Plan mode";
 
 export const PLAN_TOOL_PROMPT_GUIDELINES = [
 	"In Plan mode, use create/update for substantial multi-step work with full Markdown, then wait for the review selector before execution.",
+	PLAN_MODE_RESEARCH_GATE,
 	PLAN_MODE_WRITING_STYLE,
 	PLAN_MODE_TOOL_ACCESS,
 	PLAN_UPDATE_RESPONSE_GUIDANCE,

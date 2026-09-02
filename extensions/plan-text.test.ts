@@ -1,16 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checklistMarkdown, PLAN_MODE_TOOL_ACCESS, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, summarizePlanChanges } from "./plan-text.ts";
+import { checklistMarkdown, PLAN_MODE_RESEARCH_GATE, PLAN_MODE_TOOL_ACCESS, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, summarizePlanChanges } from "./plan-text.ts";
 
 test("plan tool guidance distinguishes full Plan mode plans from outside-mode checklists", () => {
 	assert.match(PLAN_TOOL_DESCRIPTION, /In Plan mode/);
 	assert.match(PLAN_TOOL_DESCRIPTION, /Outside Plan mode/);
 	assert.match(PLAN_TOOL_DESCRIPTION, /decision-first writing/);
+	assert.match(PLAN_TOOL_DESCRIPTION, /after read-only research/);
+	assert.match(PLAN_MODE_RESEARCH_GATE, /final decision and execution contract/);
+	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /Research first/);
+	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /final decision and execution contract/);
 	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /checklists outside Plan mode/);
 	assert.match(PLAN_MODE_WRITING_STYLE, /scope, audience, and conclusion/);
 	assert.match(PLAN_MODE_TOOL_ACCESS, /notes, memory, Fovea, Herdr inspection/);
 	assert.ok(PLAN_TOOL_PROMPT_GUIDELINES.some((guideline) => /steps and no full Markdown content/.test(guideline)));
 	assert.ok(PLAN_TOOL_PROMPT_GUIDELINES.some((guideline) => /Enter Plan mode first/.test(guideline)));
+	assert.ok(PLAN_TOOL_PROMPT_GUIDELINES.some((guideline) => /research and discovery are complete/.test(guideline)));
 });
 
 test("plan updates summarize changed sections and checklist steps", () => {
