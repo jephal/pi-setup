@@ -214,12 +214,42 @@ parent pi ── private Unix socket ──> child datadog tools
     └── Datadog MCP client / OAuth CLI
 ```
 
+Subagents use role-aware model tiers. Bundled agents default to the medium
+route for ordinary work; the main model can override a single call, parallel
+item, or chain step with `modelTier` when the task warrants it.
+
 ```text
-scout              → gpt-5.6-luna
-planner            → claude-opus-5
-reviewer           → claude-opus-5
-worker             → gpt-5.6-terra
-datadog-investigator → gpt-5.6-luna
+fast     → gpt-5.6-luna
+medium   → claude-sonnet-5 for planning/review, gpt-5.6-terra for implementation
+complex  → claude-opus-5 for planning/review, gpt-5.6-sol for implementation
+```
+
+Default presets:
+
+```text
+scout                 → fast / gpt-5.6-luna
+planner               → medium / claude-sonnet-5
+reviewer              → medium / claude-sonnet-5
+worker                → medium / gpt-5.6-terra
+datadog-investigator  → fast / gpt-5.6-luna
+```
+
+Choose `fast` for reconnaissance, simple searches, short summaries, and clear
+low-risk tasks. Choose `medium` by default for ordinary planning, review, tests,
+bug fixes, and bounded implementation. Choose `complex` only for ambiguous
+architecture, security or concurrency risk, difficult debugging, high-cost
+failure, or a failed medium attempt. When unsure, choose medium; task length
+alone is not a reason to choose complex.
+
+For example, a normal mixed chain can keep the scout fast while escalating only
+the risky implementation step:
+
+```text
+subagent({ chain: [
+  { agent: "scout", task: "Find the relevant code", modelTier: "fast" },
+  { agent: "planner", task: "Plan the change using {previous}" },
+  { agent: "worker", task: "Implement the plan using {previous}", modelTier: "complex" }
+] })
 ```
 
 Use the read-only workflow first:
@@ -235,7 +265,7 @@ Implementation workflows are also available:
 /implement-and-review <task>
 ```
 
-The setup installs missing default agent definitions into `~/.pi/agent/agents/` without overwriting existing files. Project-local agents remain opt-in and require confirmation.
+The setup installs missing default agent definitions into `~/.pi/agent/agents/` without overwriting existing files. Project-local agents remain opt-in and require confirmation. Existing custom agents may keep an exact `model:` value; agents without `modelTier` retain that legacy model. Because installed defaults are never overwritten, remove or update an existing copied agent definition if you want the new bundled tier preset to take effect.
 
 ### Herdr shell integration
 

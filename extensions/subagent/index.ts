@@ -32,6 +32,7 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { MODEL_ROUTE_SUMMARY, MODEL_SELECTION_GUIDANCE, MODEL_TIERS, type ModelTier, resolveAgentModel } from "./models.ts";
 import {
 	createMcpForwardingBridge,
 	getMcpForwardingProvider,
@@ -101,6 +102,7 @@ function formatUsageStats(
 		turns?: number;
 	} | undefined,
 	model?: string,
+	modelTier?: ModelTier,
 ): string {
 	const stats = usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 	const parts: string[] = [];
@@ -113,7 +115,7 @@ function formatUsageStats(
 	if (stats.contextTokens && stats.contextTokens > 0) {
 		parts.push(`ctx:${formatTokens(stats.contextTokens)}`);
 	}
-	if (model) parts.push(model);
+	if (model) parts.push(`${modelTier ? `${modelTier}:` : ""}${model}`);
 	return parts.join(" ");
 }
 
@@ -141,6 +143,7 @@ interface SingleResult {
 	recoveryPath?: string;
 	usage: UsageStats;
 	model?: string;
+	modelTier?: ModelTier;
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
@@ -170,6 +173,7 @@ interface CompactResult {
 	stderr: string;
 	usage: UsageStats;
 	model?: string;
+	modelTier?: ModelTier;
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
@@ -280,17 +284,17 @@ export function unsupportedChildToolNames(agent: AgentConfig): string[] {
 	return [...new Set((agent.tools ?? []).filter((tool) => !SAFE_CHILD_TOOLS.has(tool)))];
 }
 
-/** Builds child CLI arguments while retaining the parent model and thinking defaults. */
+/** Builds child CLI arguments while retaining legacy parent model and thinking defaults. */
 export function buildChildArgs(
-	agent: Pick<AgentConfig, "model">,
+	agent: Pick<AgentConfig, "model"> & Partial<Pick<AgentConfig, "name" | "modelTier">>,
 	parentCtx: Pick<ExtensionContext, "model" | "thinkingLevel">,
+	overrideTier?: ModelTier,
 ): string[] {
 	const args = ["--mode", "json", "-p", "--no-session"];
-	if (agent.model) {
-		args.push("--model", agent.model);
-	} else if (parentCtx.model) {
-		args.push("--model", `${parentCtx.model.provider}/${parentCtx.model.id}`);
-		if (parentCtx.thinkingLevel) args.push("--thinking", parentCtx.thinkingLevel);
+	const resolved = resolveAgentModel(agent, parentCtx.model ?? {}, overrideTier);
+	if (resolved.model) {
+		args.push("--model", resolved.model);
+		if (resolved.source === "parent" && parentCtx.thinkingLevel) args.push("--thinking", parentCtx.thinkingLevel);
 	}
 	return args;
 }
@@ -340,6 +344,7 @@ export function compactResult(result: SingleResult): CompactResult {
 			: `${stderrTruncation.text}${truncationMarker(stderrTruncation, "last", PER_TASK_STDERR_BYTES, PER_TASK_STDERR_LINES)}`,
 		usage: result.usage,
 		...(result.model ? { model: sanitizeText(result.model) } : {}),
+		...(result.modelTier ? { modelTier: result.modelTier } : {}),
 		...(result.stopReason ? { stopReason: sanitizeText(result.stopReason) } : {}),
 		...(result.errorMessage ? { errorMessage: boundText(result.errorMessage, PER_TASK_STDERR_BYTES, PER_TASK_STDERR_LINES).text } : {}),
 		...(result.step !== undefined ? { step: result.step } : {}),
@@ -403,6 +408,7 @@ async function runSingleAgent(
 	agents: AgentConfig[],
 	agentName: string,
 	task: string,
+	modelTier: ModelTier | undefined,
 	cwd: string | undefined,
 	step: number | undefined,
 	signal: AbortSignal | undefined,
@@ -424,7 +430,8 @@ async function runSingleAgent(
 		};
 	}
 
-	const args = buildChildArgs(agent, parentCtx);
+	const resolvedModel = resolveAgentModel(agent, parentCtx.model ?? {}, modelTier);
+	const args = buildChildArgs(agent, parentCtx, modelTier);
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
@@ -438,7 +445,8 @@ async function runSingleAgent(
 		messages: [],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: agent.model,
+		model: resolvedModel.model,
+		modelTier: resolvedModel.tier,
 		step,
 	};
 
@@ -549,7 +557,7 @@ async function runSingleAgent(
 							currentResult.usage.cost += usage.cost?.total || 0;
 							currentResult.usage.contextTokens = usage.totalTokens || 0;
 						}
-						if (!currentResult.model && msg.model) currentResult.model = msg.model;
+						if (msg.model) currentResult.model = msg.model;
 						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
 						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 					}
@@ -624,23 +632,27 @@ async function runSingleAgent(
 }
 
 const BUNDLED_AGENT_GUIDANCE = [
-	"scout — fast repository reconnaissance (gpt-5.6-luna)",
-	"planner — read-only implementation planning (claude-opus-5)",
-	"reviewer — read-only code quality and security review (claude-opus-5)",
-	"worker — general implementation with full capabilities (gpt-5.6-terra)",
-	"datadog-investigator — read-only evidence-first Datadog investigation (gpt-5.6-luna)",
+	"scout — fast repository reconnaissance (default fast: gpt-5.6-luna)",
+	"planner — read-only implementation planning (default medium: claude-sonnet-5; complex: claude-opus-5)",
+	"reviewer — read-only code quality and security review (default medium: claude-sonnet-5; complex: claude-opus-5)",
+	"worker — general implementation with full capabilities (default medium: gpt-5.6-terra)",
+	"datadog-investigator — read-only evidence-first Datadog investigation (default fast: gpt-5.6-luna)",
 ].join("; ");
 const AGENT_NAME_DESCRIPTION = `Exact bundled agent names: ${BUNDLED_AGENT_GUIDANCE}. Custom user/project agents may also be available; they are discovered at runtime.`;
+const MODEL_TIER_DESCRIPTION = `Optional model tier override: fast for clear low-risk work, medium by default, complex only for ambiguity, security/concurrency risk, difficult debugging, high-cost failure, or a failed medium attempt. When unsure, choose medium. Routes: ${MODEL_ROUTE_SUMMARY}.`;
+const ModelTierSchema = StringEnum(MODEL_TIERS, { description: MODEL_TIER_DESCRIPTION });
 
 const TaskItem = Type.Object({
 	agent: Type.String({ description: AGENT_NAME_DESCRIPTION }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
+	modelTier: Type.Optional(ModelTierSchema),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
 
 const ChainItem = Type.Object({
 	agent: Type.String({ description: AGENT_NAME_DESCRIPTION }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
+	modelTier: Type.Optional(ModelTierSchema),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
 
@@ -654,6 +666,7 @@ const SubagentParams = Type.Object({
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
+	modelTier: Type.Optional(ModelTierSchema),
 	agentScope: Type.Optional(AgentScopeSchema),
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
@@ -682,6 +695,9 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Delegate large or parallelizable work to isolated subagents",
 		promptGuidelines: [
 			"For substantial implementation, chain a worker, reviewer, then worker to apply review feedback.",
+			"Choose fast for reconnaissance and clear low-risk work; use medium by default; choose complex only for ambiguity, security or concurrency risk, difficult debugging, high-cost failure, or a failed medium attempt.",
+			"In chains and parallel batches, set modelTier only on the step that needs escalation; do not make the whole workflow complex because one task is risky.",
+			MODEL_SELECTION_GUIDANCE,
 			"Review and validate delegated changes; prefer git mv for one-to-one moves and ast-grep for mechanical refactors.",
 		],
 		parameters: SubagentParams,
@@ -776,6 +792,7 @@ export default function (pi: ExtensionAPI) {
 						agents,
 						step.agent,
 						taskWithContext,
+						step.modelTier ?? params.modelTier,
 						step.cwd,
 						i + 1,
 						signal,
@@ -826,6 +843,7 @@ export default function (pi: ExtensionAPI) {
 						messages: [],
 						stderr: "",
 						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+						modelTier: params.tasks[i].modelTier ?? params.modelTier,
 					};
 				}
 
@@ -849,6 +867,7 @@ export default function (pi: ExtensionAPI) {
 						agents,
 						t.agent,
 						t.task,
+						t.modelTier ?? params.modelTier,
 						t.cwd,
 						undefined,
 						signal,
@@ -890,6 +909,7 @@ export default function (pi: ExtensionAPI) {
 					agents,
 					params.agent,
 					params.task,
+					params.modelTier,
 					params.cwd,
 					undefined,
 					signal,
@@ -932,11 +952,13 @@ export default function (pi: ExtensionAPI) {
 					// Clean up {previous} placeholder for display
 					const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
 					const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
+					const tier = step.modelTier ?? args.modelTier;
 					text +=
 						"\n  " +
 						theme.fg("muted", `${i + 1}.`) +
 						" " +
 						theme.fg("accent", step.agent) +
+						theme.fg("muted", tier ? ` [${tier}]` : "") +
 						theme.fg("dim", ` ${preview}`);
 				}
 				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
@@ -949,7 +971,8 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("muted", ` [${scope}]`);
 				for (const t of args.tasks.slice(0, 3)) {
 					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
-					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
+					const tier = t.modelTier ?? args.modelTier;
+					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("muted", tier ? ` [${tier}]` : "")}${theme.fg("dim", ` ${preview}`)}`;
 				}
 				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
 				return new Text(text, 0, 0);
@@ -960,7 +983,7 @@ export default function (pi: ExtensionAPI) {
 				theme.fg("toolTitle", theme.bold("subagent ")) +
 				theme.fg("accent", agentName) +
 				theme.fg("muted", ` [${scope}]`);
-			text += `\n  ${theme.fg("dim", preview)}`;
+			text += `\n  ${theme.fg("muted", args.modelTier ? `[${args.modelTier}] ` : "")}${theme.fg("dim", preview)}`;
 			return new Text(text, 0, 0);
 		},
 
@@ -999,7 +1022,7 @@ export default function (pi: ExtensionAPI) {
 					container.addChild(new Spacer(1));
 					container.addChild(new Markdown(r.output.trim(), 0, 0, mdTheme));
 				}
-				const usage = formatUsageStats(r.usage, r.model);
+				const usage = formatUsageStats(r.usage, r.model, r.modelTier);
 				if (usage) container.addChild(new Text(theme.fg("dim", usage), 0, 0));
 			};
 
@@ -1013,7 +1036,7 @@ export default function (pi: ExtensionAPI) {
 					addExpandedResult(container, r, "─── ");
 					return container;
 				}
-				const usage = formatUsageStats(r.usage, r.model);
+				const usage = formatUsageStats(r.usage, r.model, r.modelTier);
 				return new Text(`${header}\n${theme.fg("toolOutput", outputPreview(r) || "(no output)")}${usage ? `\n${theme.fg("dim", usage)}` : ""}`, 0, 0);
 			}
 

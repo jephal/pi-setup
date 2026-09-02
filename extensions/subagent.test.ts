@@ -16,6 +16,9 @@ test("subagent tool contract lists the bundled agent names", () => {
 		assert.match(definition.description, new RegExp(name));
 		assert.match(definition.parameters.properties.agent.description, new RegExp(name));
 	}
+	assert.ok(definition.parameters.properties.modelTier);
+	assert.match(definition.parameters.properties.modelTier.description, /medium by default/);
+	assert.match(definition.parameters.properties.modelTier.description, /complex only/);
 });
 
 test("subagent helpers concatenate final assistant text and sanitize bounded output", () => {
@@ -46,6 +49,8 @@ test("subagent child arguments preserve parent high-thinking defaults unless the
 	const parent = { model: { provider: "openai", id: "gpt-5.6" }, thinkingLevel: "high" } as any;
 	assert.deepEqual(buildChildArgs({ model: undefined }, parent), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-5.6", "--thinking", "high"]);
 	assert.deepEqual(buildChildArgs({ model: "openai/gpt-5.6-terra" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-5.6-terra"]);
+	assert.deepEqual(buildChildArgs({ name: "planner", model: "claude-opus-5", modelTier: "medium" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "anthropic/claude-sonnet-5"]);
+	assert.deepEqual(buildChildArgs({ name: "worker", model: "gpt-5.6-terra", modelTier: "medium" }, parent, "complex"), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-5.6-sol"]);
 });
 
 test("subagent streaming details bound raw stderr and retain long single-line tasks", () => {
