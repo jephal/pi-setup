@@ -267,6 +267,16 @@ Implementation workflows are also available:
 
 The setup installs missing default agent definitions into `~/.pi/agent/agents/` without overwriting existing files. Project-local agents remain opt-in and require confirmation. Existing custom agents may keep an exact `model:` value; agents without `modelTier` retain that legacy model. Because installed defaults are never overwritten, remove or update an existing copied agent definition if you want the new bundled tier preset to take effect.
 
+### Herdr agent state integration
+
+For accurate Herdr sidebar state, install Herdr's managed Pi integration once:
+
+```bash
+herdr integration install pi
+```
+
+Then reload Pi with `/reload`. The integration reports normal Pi lifecycle state as `working` or `idle`, and this package reports its human-in-the-loop dialogs as `blocked`: `ask_questions`, Plan review and editing, approval prompts, memory deletion confirmation, and project-agent approval. Herdr uses `blocked` for needs-attention indicators, waits, notifications, and workspace/tab rollups. Herdr owns the installed file at `~/.pi/agent/extensions/herdr-agent-state.ts`; do not copy or edit that file in this repository. The event reports are harmless when the integration is not installed or Pi is running outside Herdr.
+
 ### Herdr shell integration
 
 When Pi runs inside Herdr (`HERDR_ENV=1`), the `herdr_shell` tool lets the model place long-lived processes in a right-side pane while keeping the Pi pane visible:

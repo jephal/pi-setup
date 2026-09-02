@@ -30,12 +30,15 @@ else
 fi
 
 if command -v herdr >/dev/null 2>&1; then
-  log "Herdr is already installed: $(command -v herdr)"
+  HERDR_CMD="$(command -v herdr)"
+  log "Herdr is already installed: $HERDR_CMD"
 else
   log "Herdr is not installed; using the official Herdr installer."
   curl -fsSL https://herdr.dev/install.sh | HERDR_INSTALL_DIR="$LOCAL_BIN" sh
   hash -r
-  [ -x "$LOCAL_BIN/herdr" ] || command -v herdr >/dev/null 2>&1 || fail "Herdr installation finished, but herdr is not on PATH. Add ~/.local/bin to PATH and rerun."
+  HERDR_CMD="$(command -v herdr || true)"
+  HERDR_CMD="${HERDR_CMD:-${LOCAL_BIN}/herdr}"
+  [ -x "$HERDR_CMD" ] || fail "Herdr installation finished, but herdr is not on PATH. Add ~/.local/bin to PATH and rerun."
 fi
 
 if command -v ast-grep >/dev/null 2>&1; then
@@ -53,6 +56,9 @@ fi
 
 log "Installing or updating the pi-setup package."
 "$PI_CMD" install "$PI_SETUP_PACKAGE"
+
+log "Installing the Herdr Pi lifecycle integration."
+"$HERDR_CMD" integration install pi
 
 if [ ! -e "$ENV_FILE" ]; then
   cat >"$ENV_FILE" <<EOF
@@ -72,6 +78,7 @@ printf '  Start Pi:              pi\n'
 printf '  Notes directory:       %s\n' "$NOTES_DIR"
 if command -v herdr >/dev/null 2>&1 || [ -x "$LOCAL_BIN/herdr" ]; then
   printf '  Herdr:                 installed\n'
+  printf '  Herdr Pi integration:  installed\n'
 else
   printf '  Herdr:                 not found on PATH\n'
 fi

@@ -8,6 +8,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withHerdrBlock } from "./herdr-blocking.ts";
 import {
 	EditableOptionState,
 	OTHER_OPTION_VALUE,
@@ -124,7 +125,7 @@ export default function askQuestions(pi: ExtensionAPI) {
 			}));
 			const isMulti = questions.length > 1;
 
-			const result = await ctx.ui.custom<AskQuestionsResult | null | undefined>(
+			const result = await withHerdrBlock(pi, "Waiting for your answers", () => ctx.ui.custom<AskQuestionsResult | null | undefined>(
 				(tui, theme, _keybindings, done) => {
 					let currentTab = 0;
 					let optionIndex = 0;
@@ -523,7 +524,7 @@ export default function askQuestions(pi: ExtensionAPI) {
 					}
 					return component;
 				},
-			);
+			));
 
 			if (!result || result.cancelled) return cancelledResult(questions, params.title);
 
