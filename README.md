@@ -273,19 +273,29 @@ The setup installs missing default agent definitions into `~/.pi/agent/agents/` 
 
 ### Background subagents
 
-The `subagent` tool keeps its existing synchronous behavior by default. Single-agent tasks run in the background by default and return immediately with a task ID. Set `background: false` when the parent needs an inline result. The main conversation remains usable while the child works:
+The `subagent` tool keeps its existing synchronous behavior by default. Single-agent tasks run in the background by default and return immediately with a task ID. For independent work, set `background: true` with a `tasks` array to launch a background batch:
 
 ```text
-subagent({ agent: "scout", task: "Inspect the authentication flow", background: true })
-get_subagent_status({})
-send_subagent_message({ taskId: "abcd1234", message: "Also check the migration scripts", delivery: "followUp" })
-get_subagent_result({ taskId: "abcd1234" })
-cancel_subagent({ taskId: "abcd1234" })
+subagent({ tasks: [
+  { agent: "scout", task: "Inspect the authentication flow" },
+  { agent: "scout", task: "Inspect the authentication tests" },
+  { agent: "reviewer", task: "Identify security risks in the authentication flow" }
+], background: true })
 ```
 
-Background tasks are scoped to the current Pi session and are stopped on reload, session replacement, or shutdown. Existing chains remain synchronous because each step depends on the previous result. Their intermediate output stays outside the parent context. The final bounded result is delivered back to the parent, and a child can use the child-only `contact_supervisor` tool for an important progress update or decision request. The parent can answer by sending a follow-up message with the task ID.
+The call returns a batch ID immediately. Completion is event-driven: Pi sends one compact completion message when all tasks settle. Do not poll status or sleep in a loop. Retrieve all worker outputs once after that message:
 
-Background workers share the selected working directory, so do not run concurrent write-capable agents against the same files unless you have an explicit coordination strategy. Worktree isolation and direct child-to-child team messaging are intentionally not part of this workflow.
+```text
+get_subagent_batch_result({ batchId: "abcd1234" })
+send_subagent_message({ taskId: "task5678", message: "Also check the migration scripts", delivery: "followUp" })
+cancel_subagent_batch({ batchId: "abcd1234" })
+```
+
+Use `get_subagent_status` only for an intentional one-time inspection, and `get_subagent_result` for one task. Set `background: false` when the parent needs an inline result. Chains remain synchronous because each step depends on the previous result.
+
+Background tasks are scoped to the current Pi session and are stopped on reload, session replacement, or shutdown. Their intermediate output stays outside the parent context until the batch result is requested. A child can use the child-only `contact_supervisor` tool for an important progress update or decision request. The parent can answer by sending a follow-up message with the task ID.
+
+Background workers share the selected working directory, so do not run concurrent write-capable agents against the same files unless you have an explicit coordination strategy. Give each worker disjoint file ownership or use a worktree. Direct child-to-child team messaging is intentionally not part of this workflow.
 
 ### Herdr agent state integration
 
