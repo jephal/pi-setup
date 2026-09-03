@@ -21,9 +21,11 @@ test("subagent tool contract lists the bundled agent names", () => {
 	assert.match(definition.description, /run in the background by default/);
 	assert.match(definition.description, /background: false/);
 	assert.match(definition.parameters.properties.modelTier.description, /medium by default/);
-	for (const name of ["get_subagent_status", "get_subagent_result", "send_subagent_message", "cancel_subagent"]) {
+	for (const name of ["get_subagent_status", "get_subagent_result", "get_subagent_batch_result", "send_subagent_message", "cancel_subagent", "cancel_subagent_batch"]) {
 		assert.ok(registered.some((tool) => tool.name === name), `missing ${name}`);
 	}
+	assert.match(definition.description, /do not poll status or sleep/);
+	assert.match(definition.description, /background: true with parallel tasks/);
 	assert.match(definition.parameters.properties.modelTier.description, /complex only/);
 });
 

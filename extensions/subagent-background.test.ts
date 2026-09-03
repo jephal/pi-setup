@@ -21,6 +21,22 @@ function fakeRpcChildScript(): string {
 	].join("");
 }
 
+function fakeSpec(id: string, task: string) {
+	return {
+		id,
+		agent: "worker",
+		agentSource: "user" as const,
+		task,
+		cwd: process.cwd(),
+		command: process.execPath,
+		args: ["-e", fakeRpcChildScript()],
+		env: { ...process.env },
+		bridge: { env: {}, close: async () => undefined },
+		onReport: () => undefined,
+		onSettled: () => undefined,
+	};
+}
+
 function delayedSettlementRaceScript(): string {
 	return [
 		"process.stdin.setEncoding('utf8');",
@@ -191,6 +207,35 @@ test("background shutdown force-kills a child that ignores SIGTERM", async () =>
 	await assert.rejects(start, /aborted|shutdown|closed/i);
 	await shutdown;
 	assert.ok(Date.now() - started < 4_000);
+});
+
+test("background batches start several children and settle once without polling", async () => {
+	const manager = new BackgroundTaskManager();
+	const settled: string[] = [];
+	const started = await manager.startBatch(
+		[fakeSpec("batch-task-1", "inspect auth"), fakeSpec("batch-task-2", "inspect tests")],
+		(batch) => settled.push(batch.id),
+	);
+	assert.equal(started.tasks.length, 2);
+	assert.equal(started.batch.total, 2);
+	await waitFor(() => manager.getBatch(started.batch.id)?.status === "completed");
+	assert.equal(manager.getBatch(started.batch.id)?.completed, 2);
+	assert.deepEqual(settled, [started.batch.id]);
+	await manager.send("batch-task-1", "also inspect migrations", "followUp");
+	await waitFor(() => settled.length === 2);
+	assert.deepEqual(settled, [started.batch.id, started.batch.id]);
+	await manager.shutdown();
+});
+
+test("failed batch startup rolls back children that already started", async () => {
+	const manager = new BackgroundTaskManager();
+	const invalid = { ...fakeSpec("rollback-invalid", "fail to start"), command: "/definitely/not-a-command" };
+	await assert.rejects(
+		manager.startBatch([fakeSpec("rollback-valid", "start normally"), invalid], () => undefined),
+		/(spawn|ENOENT|not found)/i,
+	);
+	assert.equal(manager.list().length, 0);
+	await manager.shutdown();
 });
 
 test("background task manager returns immediately and preserves RPC child context for follow-ups", async () => {

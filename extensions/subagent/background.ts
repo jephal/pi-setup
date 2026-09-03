@@ -17,6 +17,7 @@ export type BackgroundDelivery = "steer" | "followUp";
 
 export interface BackgroundTaskSnapshot {
 	id: string;
+	batchId?: string;
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	task: string;
@@ -31,8 +32,23 @@ export interface BackgroundTaskSnapshot {
 	errorMessage?: string;
 }
 
+export type BackgroundBatchStatus = "starting" | "running" | "completed" | "failed" | "cancelled";
+
+export interface BackgroundBatchSnapshot {
+	id: string;
+	taskIds: string[];
+	status: BackgroundBatchStatus;
+	total: number;
+	completed: number;
+	failed: number;
+	cancelled: number;
+	startedAt: number;
+	updatedAt: number;
+}
+
 export interface BackgroundTaskSpec {
 	id?: string;
+	batchId?: string;
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	task: string;
@@ -113,6 +129,7 @@ class RpcBackgroundChild {
 	private constructor(spec: BackgroundTaskSpec, process: ChildProcessWithoutNullStreams) {
 		this.snapshot = {
 			id: spec.id ?? randomUUID().slice(0, 8),
+			...(spec.batchId ? { batchId: spec.batchId } : {}),
 			agent: spec.agent,
 			agentSource: spec.agentSource,
 			task: spec.task,
@@ -369,8 +386,16 @@ class RpcBackgroundChild {
 	}
 }
 
+interface BackgroundBatchRecord {
+	snapshot: BackgroundBatchSnapshot;
+	expectedTaskCount: number;
+	notified: boolean;
+	onSettled: (snapshot: BackgroundBatchSnapshot) => void;
+}
+
 export class BackgroundTaskManager {
 	private readonly tasks = new Map<string, RpcBackgroundChild>();
+	private readonly batches = new Map<string, BackgroundBatchRecord>();
 	private readonly pendingStarts = new Map<Promise<RpcBackgroundChild>, AbortController>();
 	private lifecycleEpoch = 0;
 	private shuttingDown = false;
@@ -384,7 +409,17 @@ export class BackgroundTaskManager {
 		const startSignal = spec.signal
 			? AbortSignal.any([spec.signal, startController.signal])
 			: startController.signal;
-		const pending = RpcBackgroundChild.start({ ...spec, signal: startSignal });
+		const pending = RpcBackgroundChild.start({
+			...spec,
+			signal: startSignal,
+			onSettled: (snapshot) => {
+				try {
+					spec.onSettled(snapshot);
+				} finally {
+					if (spec.batchId) this.refreshBatch(spec.batchId);
+				}
+			},
+		});
 		this.pendingStarts.set(pending, startController);
 		try {
 			const child = await pending;
@@ -400,6 +435,46 @@ export class BackgroundTaskManager {
 		}
 	}
 
+	async startBatch(
+		specs: BackgroundTaskSpec[],
+		onSettled: (snapshot: BackgroundBatchSnapshot) => void,
+	): Promise<{ batch: BackgroundBatchSnapshot; tasks: BackgroundTaskSnapshot[] }> {
+		if (specs.length === 0) throw new Error("A background batch requires at least one task.");
+		if (this.tasks.size + this.pendingStarts.size + specs.length > MAX_BACKGROUND_TASKS) {
+			throw new Error(`Maximum background subagent limit reached (${MAX_BACKGROUND_TASKS}).`);
+		}
+		const id = randomUUID().slice(0, 8);
+		const now = Date.now();
+		const record: BackgroundBatchRecord = {
+			snapshot: { id, taskIds: [], status: "starting", total: specs.length, completed: 0, failed: 0, cancelled: 0, startedAt: now, updatedAt: now },
+			expectedTaskCount: specs.length,
+			notified: false,
+			onSettled,
+		};
+		this.batches.set(id, record);
+		try {
+			const outcomes = await Promise.allSettled(specs.map(async (spec) => {
+				const task = await this.start({ ...spec, batchId: id });
+				record.snapshot.taskIds.push(task.id);
+				this.refreshBatch(id);
+				return task;
+			}));
+			const rejected = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+			if (rejected) throw rejected.reason;
+			const tasks = outcomes.map((outcome) => (outcome as PromiseFulfilledResult<BackgroundTaskSnapshot>).value);
+			this.refreshBatch(id);
+			return { batch: record.snapshot, tasks };
+		} catch (error) {
+			const startedTaskIds = new Set([
+				...record.snapshot.taskIds,
+				...specs.map((spec) => spec.id).filter((taskId): taskId is string => Boolean(taskId && this.tasks.has(taskId))),
+			]);
+			await Promise.all([...startedTaskIds].map((taskId) => this.discard(taskId)));
+			this.batches.delete(id);
+			throw error;
+		}
+	}
+
 	get(id: string): BackgroundTaskSnapshot | undefined {
 		return this.tasks.get(id)?.snapshot;
 	}
@@ -408,13 +483,31 @@ export class BackgroundTaskManager {
 		return [...this.tasks.values()].map((task) => task.snapshot);
 	}
 
+	getBatch(id: string): BackgroundBatchSnapshot | undefined {
+		return this.batches.get(id)?.snapshot;
+	}
+
+	listBatches(): BackgroundBatchSnapshot[] {
+		return [...this.batches.values()].map((batch) => batch.snapshot);
+	}
+
+	getBatchTasks(id: string): BackgroundTaskSnapshot[] {
+		const batch = this.batches.get(id);
+		if (!batch) return [];
+		return batch.snapshot.taskIds.map((taskId) => this.tasks.get(taskId)?.snapshot).filter((task): task is BackgroundTaskSnapshot => Boolean(task));
+	}
+
 	async send(id: string, message: string, delivery: BackgroundDelivery): Promise<BackgroundTaskSnapshot> {
 		const child = this.tasks.get(id);
 		if (!child) throw new Error(`Background task ${id} was not found.`);
 		await child.send(message, delivery);
-		// Preserve the command API's acknowledgement semantics even if the child
-		// completed the follow-up in the same stdout turn. The manager's live
-		// snapshot (returned by get/list) retains the authoritative status.
+		if (child.snapshot.batchId) {
+			const batch = this.batches.get(child.snapshot.batchId);
+			if (batch) {
+				batch.notified = false;
+				this.refreshBatch(child.snapshot.batchId);
+			}
+		}
 		return { ...child.snapshot, status: "running" };
 	}
 
@@ -422,7 +515,16 @@ export class BackgroundTaskManager {
 		const child = this.tasks.get(id);
 		if (!child) throw new Error(`Background task ${id} was not found.`);
 		await child.cancel();
+		if (child.snapshot.batchId) this.refreshBatch(child.snapshot.batchId);
 		return child.snapshot;
+	}
+
+	async cancelBatch(id: string): Promise<BackgroundBatchSnapshot> {
+		const batch = this.batches.get(id);
+		if (!batch) throw new Error(`Background batch ${id} was not found.`);
+		await Promise.all(batch.snapshot.taskIds.map((taskId) => this.cancel(taskId).catch(() => undefined)));
+		this.refreshBatch(id);
+		return batch.snapshot;
 	}
 
 	async shutdown(): Promise<void> {
@@ -434,6 +536,7 @@ export class BackgroundTaskManager {
 			await Promise.all([...this.pendingStarts.keys()].map((pending) => pending.catch(() => undefined)));
 			await Promise.all([...this.tasks.values()].map((task) => task.close().catch(() => undefined)));
 			this.tasks.clear();
+			this.batches.clear();
 		})().finally(() => {
 			this.shuttingDown = false;
 			this.shutdownPromise = undefined;
@@ -443,5 +546,35 @@ export class BackgroundTaskManager {
 
 	addReport(id: string, report: SupervisorReport): void {
 		this.tasks.get(id)?.addReport(report);
+	}
+
+	private async discard(id: string): Promise<void> {
+		const child = this.tasks.get(id);
+		if (!child) return;
+		await child.close().catch(() => undefined);
+		this.tasks.delete(id);
+	}
+
+	private refreshBatch(id: string): void {
+		const batch = this.batches.get(id);
+		if (!batch) return;
+		const tasks = this.getBatchTasks(id);
+		batch.snapshot.completed = tasks.filter((task) => task.status === "completed").length;
+		batch.snapshot.failed = tasks.filter((task) => task.status === "failed").length;
+		batch.snapshot.cancelled = tasks.filter((task) => task.status === "cancelled").length;
+		batch.snapshot.updatedAt = Date.now();
+		if (tasks.length < batch.expectedTaskCount) {
+			batch.snapshot.status = "starting";
+			return;
+		}
+		if (tasks.some((task) => task.status === "starting" || task.status === "running")) {
+			batch.snapshot.status = "running";
+			return;
+		}
+		batch.snapshot.status = batch.snapshot.failed > 0 ? "failed" : batch.snapshot.cancelled > 0 ? "cancelled" : "completed";
+		if (!batch.notified) {
+			batch.notified = true;
+			batch.onSettled(batch.snapshot);
+		}
 	}
 }
