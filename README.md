@@ -131,8 +131,12 @@ export DD_MCP_SITE=us3
 export DD_MCP_ENDPOINT_PATH='v1/mcp?toolsets=core,error-tracking,rum'
 ```
 
-The extension is intended for read-only investigation. Give the Datadog account
-`mcp_read` and resource read permissions, but not `mcp_write`.
+Read-only behavior is enforced by two authoritative boundaries: the Datadog IAM
+permissions on the account and the explicitly configured MCP endpoint toolsets. Grant
+only `mcp_read` and resource-read permissions (not `mcp_write`), and keep
+`DD_MCP_ENDPOINT_PATH` limited to the configured `core`, `error-tracking`, and `rum`
+toolsets. The extension does not infer permissions from tool names or apply a `write`
+name heuristic; unexpected endpoint toolsets are rejected.
 
 ## Local notes integration
 

@@ -9,7 +9,6 @@ const SOCKET_ENV = 'PI_MCP_FORWARD_SOCKET';
 const TOKEN_ENV = 'PI_MCP_FORWARD_TOKEN';
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 60_000;
-const BRIDGE_CLOSE_TIMEOUT_MS = 2_000;
 
 type ForwardRequestMethod = 'tools/list' | 'tools/search' | 'tools/call';
 
@@ -42,7 +41,7 @@ export interface ForwardedToolResult {
 
 /** Parent-side provider implementation exposed to child subagent bridges. */
 export interface McpForwardingProvider {
-  listTools(ctx: ExtensionContext): Promise<ForwardedToolDefinition[]>;
+  listTools(ctx: ExtensionContext, signal?: AbortSignal): Promise<ForwardedToolDefinition[]>;
   searchTools(
     query: string,
     limit: number,
@@ -106,15 +105,29 @@ export function isMcpForwardingChild(): boolean {
   return Boolean(process.env[SOCKET_ENV] && process.env[TOKEN_ENV]);
 }
 
-/**
- * Sends one request from a child process to its parent MCP bridge.
- *
- * @param method - Forwarding operation to perform.
- * @param params - Operation parameters.
- * @param signal - Optional cancellation signal for the child request.
- * @returns The parent response payload.
- * @throws When the bridge is unavailable, times out, rejects the request, or returns invalid data.
- */
+/** Validates one untrusted response envelope before its fields are consumed. */
+export function parseForwardingResponse(line: string, expectedId: string): ForwardResponse {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line) as unknown;
+  } catch {
+    throw new Error('MCP forwarding returned invalid JSON.');
+  }
+  if (!isRecord(parsed) || typeof parsed.id !== 'string') {
+    throw new Error('MCP forwarding returned an invalid response.');
+  }
+  if (parsed.id !== expectedId) {
+    throw new Error('MCP forwarding returned a mismatched request ID.');
+  }
+  if (parsed.error !== undefined && typeof parsed.error !== 'string') {
+    throw new Error('MCP forwarding returned an invalid response.');
+  }
+  if (!('result' in parsed) && !('error' in parsed)) {
+    throw new Error('MCP forwarding returned an invalid response.');
+  }
+  return parsed as ForwardResponse;
+}
+
 export async function requestForwardedMcp(
   method: ForwardRequestMethod,
   params: Record<string, unknown> = {},
@@ -179,18 +192,16 @@ export async function requestForwardedMcp(
       const line = buffer.slice(0, newline);
       let response: ForwardResponse;
       try {
-        response = JSON.parse(line) as ForwardResponse;
-      } catch {
-        finish(() => reject(new Error('MCP forwarding returned invalid JSON.')));
+        // JSON.parse can produce null, arrays, or primitives. Validate the
+        // envelope before reading response.id so malformed peers cannot escape
+        // through an uncaught data-event exception.
+        response = parseForwardingResponse(line, request.id);
+      } catch (error) {
+        finish(() => reject(error instanceof Error ? error : new Error(String(error))));
         return;
       }
-
-      if (response.id !== request.id) {
-        finish(() => reject(new Error('MCP forwarding returned a mismatched request ID.')));
-        return;
-      }
-      if (response.error) {
-        finish(() => reject(new Error(response.error)));
+      if (response.error !== undefined) {
+        finish(() => reject(new Error(response.error || 'MCP forwarding request was rejected.')));
         return;
       }
       finish(() => resolve(response.result));
@@ -213,16 +224,52 @@ export async function requestForwardedMcp(
  * @returns Bridge environment variables and cleanup function.
  * @throws When the private socket cannot be created.
  */
+function abortError(): Error {
+  return new Error('MCP forwarding bridge setup was aborted.');
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortError();
+}
+
+async function waitForAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw abortError();
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => {
+      signal.removeEventListener('abort', abort);
+      reject(abortError());
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export async function createMcpForwardingBridge(
   provider: McpForwardingProvider,
   ctx: ExtensionContext,
   signal: AbortSignal | undefined,
+  lifetimeSignal: AbortSignal | undefined = signal,
 ): Promise<McpForwardingBridge> {
-  const forwardedTools = await provider.listTools(ctx);
+  throwIfAborted(signal);
+  // listTools may be remote or otherwise slow. Race it with cancellation so a
+  // cancelled child never goes on to publish a bridge after discovery returns.
+  const forwardedTools = await waitForAbort(provider.listTools(ctx, signal), signal);
+  throwIfAborted(signal);
   const allowedToolNames = new Set(forwardedTools.map((tool) => tool.name));
   const bridgeDir = await mkdtemp(join(tmpdir(), 'pi-mcp-forward-'));
   try {
     await chmod(bridgeDir, 0o700);
+    throwIfAborted(signal);
   } catch (error) {
     await rmdir(bridgeDir).catch(() => undefined);
     throw error;
@@ -230,38 +277,49 @@ export async function createMcpForwardingBridge(
   const socketPath = join(bridgeDir, 'bridge.sock');
   const token = randomUUID();
   const sockets = new Set<Socket>();
+  const ignoreServerErrors = (): void => undefined;
   const server = createServer((socket) => {
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
-    handleConnection(socket, token, provider, ctx, signal, allowedToolNames);
+    handleConnection(socket, token, provider, ctx, lifetimeSignal, allowedToolNames);
   });
+  let resolveListenComplete!: () => void;
+  const listenComplete = new Promise<void>((resolve) => { resolveListenComplete = resolve; });
+  let closePromise: Promise<void> | undefined;
+  const closeBridge = async (): Promise<void> => {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+      // A listen attempt can still complete after cancellation. Wait for that
+      // handshake before removing the path, then close the one shared server.
+      await listenComplete;
+      for (const socket of sockets) socket.destroy();
+      server.removeListener('error', ignoreServerErrors);
+      await closeServer(server);
+      await unlink(socketPath).catch(() => undefined);
+      await rmdir(bridgeDir).catch(() => undefined);
+    })();
+    return closePromise;
+  };
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => {
-        server.off('listening', onListening);
-        reject(error);
-      };
-      const onListening = (): void => {
-        server.off('error', onError);
-        resolve();
-      };
-      server.once('error', onError);
-      server.on('error', () => undefined);
-      server.once('listening', onListening);
-      server.listen(socketPath);
-    });
+    await listenServer(server, socketPath, signal, () => { void closeBridge(); }, resolveListenComplete);
+    // Keep a listener for errors that occur after the initial listen handshake.
+    server.on('error', ignoreServerErrors);
+    throwIfAborted(signal);
   } catch (error) {
-    await unlink(socketPath).catch(() => undefined);
-    await rmdir(bridgeDir).catch(() => undefined);
+    await closeBridge();
     throw error;
   }
 
-  const abort = (): void => {
-    for (const socket of sockets) socket.destroy();
-    if (server.listening) void server.close();
-  };
-  signal?.addEventListener('abort', abort, { once: true });
+  // The caller signal only governs startup. Once returned, the background
+  // child owns this bridge until the session lifetime ends.
+  const abort = (): void => { void closeBridge(); };
+  lifetimeSignal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted || lifetimeSignal?.aborted) {
+    lifetimeSignal?.removeEventListener('abort', abort);
+    await closeBridge();
+    throw abortError();
+  }
 
   return {
     env: {
@@ -270,27 +328,62 @@ export async function createMcpForwardingBridge(
     },
     toolNames: [...allowedToolNames],
     async close(): Promise<void> {
-      signal?.removeEventListener('abort', abort);
-      for (const socket of sockets) socket.destroy();
-      await closeServer(server);
-      await unlink(socketPath).catch(() => undefined);
-      await rmdir(bridgeDir).catch(() => undefined);
+      lifetimeSignal?.removeEventListener('abort', abort);
+      await closeBridge();
     },
   };
 }
 
-/**
- * Closes a bridge server without allowing orphaned connections to block cleanup.
- *
- * @param server - Bridge server to close.
- * @returns Resolves after the server closes or the cleanup timeout expires.
- */
+async function listenServer(
+  server: Server,
+  socketPath: string,
+  signal: AbortSignal | undefined,
+  onAbortCleanup: () => void,
+  onComplete: () => void,
+): Promise<void> {
+  if (signal?.aborted) {
+    onComplete();
+    throw abortError();
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      server.off('error', onError);
+      server.off('listening', onListening);
+      signal?.removeEventListener('abort', onAbort);
+      onComplete();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onError = (error: Error): void => finish(error);
+    const onListening = (): void => finish();
+    const onAbort = (): void => {
+      onAbortCleanup();
+      finish(abortError());
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      server.listen(socketPath);
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+/** Closes a bridge server and resolves only after Node confirms it is closed. */
 async function closeServer(server: Server): Promise<void> {
-  if (!server.listening) return;
-  await Promise.race([
-    new Promise<void>((resolve) => server.close(() => resolve())),
-    new Promise<void>((resolve) => setTimeout(resolve, BRIDGE_CLOSE_TIMEOUT_MS)),
-  ]);
+  await new Promise<void>((resolve) => {
+    try {
+      server.close(() => resolve());
+    } catch {
+      // The listen attempt may have failed before a server was created.
+      resolve();
+    }
+  });
 }
 
 /**
@@ -328,6 +421,7 @@ function handleConnection(
     socket.destroy();
   });
   socket.on('data', (chunk: string) => {
+    if (connectionController.signal.aborted) return;
     buffer += chunk;
     if (Buffer.byteLength(buffer, 'utf8') > MAX_FRAME_BYTES) {
       socket.destroy();
@@ -368,7 +462,14 @@ async function handleRequest(
 ): Promise<void> {
   let requestId = 'unknown';
   try {
-    const parsed = JSON.parse(line) as unknown;
+    if (signal?.aborted) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      writeResponse(socket, { id: 'unknown', error: 'MCP forwarding request was malformed.' });
+      return;
+    }
     if (!isRecord(parsed) || typeof parsed.id !== 'string' || typeof parsed.token !== 'string') {
       writeResponse(socket, { id: 'unknown', error: 'MCP forwarding request was malformed.' });
       return;
@@ -384,11 +485,12 @@ async function handleRequest(
     const params = request.params ?? {};
     let result: unknown;
     if (request.method === 'tools/list') {
-      result = (await provider.listTools(ctx)).filter((tool) => allowedToolNames.has(tool.name));
+      result = (await provider.listTools(ctx, signal)).filter((tool) => allowedToolNames.has(tool.name));
     } else if (request.method === 'tools/search') {
       const query = typeof params.query === 'string' ? params.query : '';
       const limit = typeof params.limit === 'number' ? params.limit : 5;
       const searchResult = await provider.searchTools(query, limit, ctx, signal);
+      if (signal?.aborted) return;
       result = {
         matches: searchResult.matches.filter((tool) => allowedToolNames.has(tool.name)),
         addedTools: searchResult.addedTools.filter((name) => allowedToolNames.has(name)),
@@ -398,11 +500,14 @@ async function handleRequest(
       if (!allowedToolNames.has(name)) throw new Error(`MCP tool is not authorized for this child: ${name}`);
       const arguments_ = isRecord(params.arguments) ? params.arguments : {};
       result = await provider.callTool(name, arguments_, signal, ctx);
+      if (signal?.aborted) return;
     } else {
       throw new Error(`Unsupported MCP forwarding method: ${request.method}`);
     }
+    if (signal?.aborted) return;
     writeResponse(socket, { id: request.id, result });
   } catch (error) {
+    if (signal?.aborted) return;
     const message = error instanceof Error ? error.message : String(error);
     writeResponse(socket, { id: requestId, error: message });
   }
@@ -415,7 +520,13 @@ async function handleRequest(
  * @param response - Response to serialize.
  */
 function writeResponse(socket: Socket, response: ForwardResponse): void {
-  if (!socket.destroyed) socket.write(`${JSON.stringify(response)}\n`);
+  if (socket.destroyed) return;
+  const frame = `${JSON.stringify(response)}\n`;
+  if (Buffer.byteLength(frame, 'utf8') > MAX_FRAME_BYTES) {
+    socket.destroy();
+    return;
+  }
+  socket.write(frame);
 }
 
 /**

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Message } from "@earendil-works/pi-ai";
-import registerSubagent, { boundHeadText, boundText, buildChildArgs, childProcessToolNames, childToolNames, compactResult, getFinalOutput, isFailedResult, sanitizeText, unsupportedChildToolNames } from "./subagent/index.ts";
+import registerSubagent, { backgroundChildProcessToolNames, boundHeadText, boundText, buildChildArgs, childProcessToolNames, childToolNames, compactResult, getFinalOutput, isFailedResult, sanitizeText, unsupportedChildToolNames } from "./subagent/index.ts";
 
 test("subagent tool contract lists the bundled agent names", () => {
 	const registered: any[] = [];
@@ -49,6 +49,18 @@ test("subagent child tools use the minimal worker default and pass bridge-author
 	const workerDefaults = childToolNames({} as any);
 	assert.deepEqual(workerDefaults, ["read", "bash", "write", "edit", "find", "grep", "ls"]);
 	assert.deepEqual(childProcessToolNames(["read", "datadog_search_tools"], ["datadog_logs", "datadog_logs"]), ["read", "datadog_search_tools", "datadog_logs"]);
+
+	const localToolNames = ["read", "datadog_search_tools"];
+	const forwardedToolNames = ["datadog_logs", "datadog_error_tracking"];
+	assert.deepEqual(backgroundChildProcessToolNames(localToolNames, forwardedToolNames), [
+		"read",
+		"datadog_search_tools",
+		"datadog_logs",
+		"datadog_error_tracking",
+		"contact_supervisor",
+	]);
+	assert.deepEqual(localToolNames, ["read", "datadog_search_tools"]);
+	assert.equal(localToolNames.includes("datadog_logs"), false);
 });
 
 test("subagent child arguments preserve parent high-thinking defaults unless the agent chooses a model", () => {

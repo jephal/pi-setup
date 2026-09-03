@@ -30,13 +30,20 @@ export function isSupervisorChild(): boolean {
 export async function createSupervisorBridge(
 	taskId: string,
 	onReport: (report: SupervisorReport) => void,
+	startupSignal?: AbortSignal,
+	lifetimeSignal: AbortSignal | undefined = startupSignal,
 ): Promise<SupervisorBridge> {
+	if (startupSignal?.aborted) throw new Error("Supervisor bridge setup was aborted.");
 	const dir = await mkdtemp(join(tmpdir(), "pi-subagent-supervisor-"));
 	try {
 		await chmod(dir, 0o700);
 	} catch (error) {
 		await rmdir(dir).catch(() => undefined);
 		throw error;
+	}
+	if (startupSignal?.aborted) {
+		await rmdir(dir).catch(() => undefined);
+		throw new Error("Supervisor bridge setup was aborted.");
 	}
 	const socketPath = join(dir, "supervisor.sock");
 	const token = randomUUID();
@@ -46,19 +53,65 @@ export async function createSupervisorBridge(
 		socket.once("close", () => sockets.delete(socket));
 		handleConnection(socket, token, taskId, onReport);
 	});
+	let resolveListenComplete!: () => void;
+	const listenComplete = new Promise<void>((resolve) => { resolveListenComplete = resolve; });
+	let closePromise: Promise<void> | undefined;
+	const closeBridge = async (): Promise<void> => {
+		if (closePromise) return closePromise;
+		closePromise = (async () => {
+			// A listen attempt can still complete after cancellation. Wait for that
+			// handshake before removing the path.
+			await listenComplete;
+			for (const socket of sockets) socket.destroy();
+			await closeSupervisorServer(server);
+			await unlink(socketPath).catch(() => undefined);
+			await rmdir(dir).catch(() => undefined);
+		})();
+		return closePromise;
+	};
 
 	try {
+		if (startupSignal?.aborted) {
+			resolveListenComplete();
+			throw new Error("Supervisor bridge setup was aborted.");
+		}
 		await new Promise<void>((resolve, reject) => {
-			server.once("error", reject);
-			server.listen(socketPath, () => {
-				server.removeListener("error", reject);
-				resolve();
-			});
+			let settled = false;
+			const finish = (error?: Error): void => {
+				if (settled) return;
+				settled = true;
+				server.removeListener("error", onError);
+				startupSignal?.removeEventListener("abort", onAbort);
+				resolveListenComplete();
+				if (error) reject(error);
+				else resolve();
+			};
+			const onError = (error: Error): void => finish(error);
+			const onAbort = (): void => {
+				void closeBridge();
+				finish(new Error("Supervisor bridge setup was aborted."));
+			};
+			server.once("error", onError);
+			startupSignal?.addEventListener("abort", onAbort, { once: true });
+			try {
+				server.listen(socketPath, () => finish());
+			} catch (error) {
+				finish(error instanceof Error ? error : new Error(String(error)));
+			}
 		});
+		if (startupSignal?.aborted) throw new Error("Supervisor bridge setup was aborted.");
 	} catch (error) {
-		await unlink(socketPath).catch(() => undefined);
-		await rmdir(dir).catch(() => undefined);
+		await closeBridge();
 		throw error;
+	}
+	// The caller signal only governs startup. Once returned, the background
+	// child owns this bridge until the session lifetime ends.
+	const abort = (): void => { void closeBridge(); };
+	lifetimeSignal?.addEventListener("abort", abort, { once: true });
+	if (startupSignal?.aborted || lifetimeSignal?.aborted) {
+		lifetimeSignal?.removeEventListener("abort", abort);
+		await closeBridge();
+		throw new Error("Supervisor bridge setup was aborted.");
 	}
 
 	return {
@@ -68,12 +121,20 @@ export async function createSupervisorBridge(
 			[SUPERVISOR_TASK_ENV]: taskId,
 		},
 		async close() {
-			for (const socket of sockets) socket.destroy();
-			if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
-			await unlink(socketPath).catch(() => undefined);
-			await rmdir(dir).catch(() => undefined);
+			lifetimeSignal?.removeEventListener("abort", abort);
+			await closeBridge();
 		},
 	};
+}
+
+async function closeSupervisorServer(server: Server): Promise<void> {
+	await new Promise<void>((resolve) => {
+		try {
+			server.close(() => resolve());
+		} catch {
+			resolve();
+		}
+	});
 }
 
 function handleConnection(socket: Socket, token: string, taskId: string, onReport: (report: SupervisorReport) => void): void {

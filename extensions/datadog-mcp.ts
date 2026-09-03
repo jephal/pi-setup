@@ -19,16 +19,136 @@ import {
 const DEFAULT_SITE = 'us3';
 const DEFAULT_CLI_PATH = join(homedir(), '.local', 'bin', 'datadog_mcp_cli');
 const DEFAULT_ENDPOINT_PATH = 'v1/mcp?toolsets=core,error-tracking,rum';
+const READ_ONLY_TOOLSETS = new Set(['core', 'error-tracking', 'rum']);
 const TOOL_PREFIX = 'datadog_';
 const SEARCH_TOOL_NAME = 'datadog_search_tools';
 
+export interface DatadogConfig {
+  cliPath: string;
+  site: string;
+  endpointPath: string;
+}
+
 let client: Client | undefined;
 let connectionPromise: Promise<Client> | undefined;
+let reconnectOperation: { epoch: number; promise: Promise<Client> } | undefined;
 let discoveryPromise: Promise<number> | undefined;
+let discoveryPromiseClient: Client | undefined;
+let discoveryClient: Client | undefined;
 let toolsDiscovered = false;
-const registeredToolNames = new Set<string>();
+let lifecycleGeneration = 0;
+let sessionEpoch = 0;
+let lifecycleAbortController = new AbortController();
+let sessionShuttingDown = false;
+let activePi: ExtensionAPI | undefined;
+const registeredToolNames = new WeakMap<object, Set<string>>();
 const remoteTools = new Map<string, McpTool>();
 const forwardedTools = new Map<string, ForwardedToolDefinition>();
+
+/** Resolves the one effective Datadog configuration used by connection and errors. */
+export function resolveDatadogConfig(env: NodeJS.ProcessEnv = process.env): DatadogConfig {
+  return {
+    cliPath: env.DD_MCP_CLI?.trim() || DEFAULT_CLI_PATH,
+    site: env.DD_MCP_SITE?.trim() || DEFAULT_SITE,
+    endpointPath: env.DD_MCP_ENDPOINT_PATH?.trim() || DEFAULT_ENDPOINT_PATH,
+  };
+}
+
+/** Rejects endpoint configurations that do not explicitly select the read-only toolsets. */
+export function validateDatadogEndpointPath(endpointPath: string): void {
+  if (!endpointPath || /[\u0000-\u001f\u007f]/.test(endpointPath) || endpointPath.includes('#')) {
+    throw new Error('DD_MCP_ENDPOINT_PATH must be a safe relative MCP path.');
+  }
+  const separator = endpointPath.indexOf('?');
+  const base = separator < 0 ? endpointPath : endpointPath.slice(0, separator);
+  if (base !== 'v1/mcp' || endpointPath.startsWith('/') || /^[a-z][a-z\d+.-]*:/i.test(endpointPath) || endpointPath.startsWith('//')) {
+    throw new Error('DD_MCP_ENDPOINT_PATH must be the relative path v1/mcp.');
+  }
+  const query = separator < 0 ? '' : endpointPath.slice(separator + 1);
+  if (/%(?![0-9a-fA-F]{2})/.test(query)) throw new Error('DD_MCP_ENDPOINT_PATH has a malformed query.');
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(query);
+  } catch {
+    throw new Error('DD_MCP_ENDPOINT_PATH has a malformed query.');
+  }
+  const keys = [...params.keys()];
+  if (keys.length === 0 || keys.some((key) => key !== 'toolsets') || params.getAll('toolsets').length !== 1) {
+    throw new Error('DD_MCP_ENDPOINT_PATH may contain only one toolsets query parameter.');
+  }
+  const values = params.get('toolsets')!.split(',').map((item) => item.trim()).filter(Boolean);
+  if (values.length === 0 || values.some((value) => !READ_ONLY_TOOLSETS.has(value))) {
+    throw new Error('DD_MCP_ENDPOINT_PATH contains unexpected toolsets; configure only core,error-tracking,rum.');
+  }
+}
+
+function shellQuote(value: string): string {
+  return `'${sanitizeDisplay(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function sanitizeDisplay(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, '?');
+}
+
+function redactConnectionMessage(value: string): string {
+  return sanitizeDisplay(value)
+    .replace(/(Bearer\s+|Basic\s+)[^\s,;)]+/gi, '$1[redacted]')
+    .replace(/(authorization\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;)]+)/gi, '$1[redacted]')
+    .replace(/((?:["']?(?:access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password|secret|api[_ -]?key|credential)["']?)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, '$1[redacted]')
+    .replace(/((?:access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key)%3[dD])[^&\s]+/gi, '$1[redacted]')
+    .replace(/([?&](?:api[_-]?key|token|key|code|credential)[^=]*=)[^&\s]+/gi, '$1[redacted]')
+    .replace(/(Cookie\s*:\s*)[^\r\n]+/gi, '$1[redacted]')
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[redacted-token]');
+}
+
+function safeEndpointPath(endpointPath: string): string {
+  try {
+    validateDatadogEndpointPath(endpointPath);
+    const params = new URLSearchParams(endpointPath.slice(endpointPath.indexOf('?') + 1));
+    const values = params.get('toolsets')!.split(',').map((item) => item.trim()).filter(Boolean);
+    return `v1/mcp?toolsets=${values.join(',')}`;
+  } catch {
+    return '[redacted endpoint]';
+  }
+}
+
+function staleLifecycleError(): Error {
+  return new Error('Datadog MCP connection was superseded or shut down.');
+}
+
+async function waitForSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw staleLifecycleError();
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => {
+      signal.removeEventListener('abort', abort);
+      reject(staleLifecycleError());
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
+      (error) => { signal.removeEventListener('abort', abort); reject(error); },
+    );
+  });
+}
+
+function isCurrentLifecycle(generation: number, expectedClient?: Client): boolean {
+  return generation === lifecycleGeneration
+    && !lifecycleAbortController.signal.aborted
+    && (expectedClient === undefined || client === expectedClient);
+}
+
+/** Installs an explicit client seam for lifecycle/discovery regression tests. */
+export function setDatadogClientForTesting(testClient: Client | undefined): void {
+  sessionEpoch++;
+  sessionShuttingDown = false;
+  lifecycleGeneration++;
+  lifecycleAbortController.abort();
+  lifecycleAbortController = new AbortController();
+  client = testClient;
+  connectionPromise = undefined;
+  reconnectOperation = undefined;
+  resetDiscoveryState();
+}
 
 /**
  * Loads Datadog's official OAuth-backed MCP tools into pi.
@@ -36,11 +156,21 @@ const forwardedTools = new Map<string, ForwardedToolDefinition>();
  * @param pi - The pi extension API.
  */
 export default function datadogMcpExtension(pi: ExtensionAPI): void {
+  activePi = pi;
   registerSearchTool(pi);
   const forwardingProvider = createForwardingProvider(pi);
   registerMcpForwardingProvider(forwardingProvider);
 
   pi.on('session_start', async (_event, ctx) => {
+    // A session can be restored in the same extension process. Do not let the
+    // previous session's client, discovery, or in-flight connection leak into
+    // the new one.
+    await teardownDatadogLifecycle(pi);
+    sessionShuttingDown = false;
+    lifecycleAbortController = new AbortController();
+    // Shutdown unregisters the provider. Re-register the same provider for a
+    // session restored in this extension process.
+    registerMcpForwardingProvider(forwardingProvider);
     // A child receives its permitted tools from --tools. Only re-activate the
     // loader when it is available in this process's filtered tool registry.
     if (pi.getAllTools().some((tool) => tool.name === SEARCH_TOOL_NAME)) {
@@ -54,7 +184,7 @@ export default function datadogMcpExtension(pi: ExtensionAPI): void {
     description: 'Connect or reconnect the Datadog MCP server using OAuth',
     handler: async (_args, ctx) => {
       try {
-        const connectedClient = await connect(ctx);
+        const connectedClient = await reconnect(ctx, pi);
         const toolCount = await discoverTools(connectedClient, pi);
         ctx.ui.notify(`Datadog MCP connected (${toolCount} searchable tools)`, 'info');
       } catch (error) {
@@ -74,20 +204,103 @@ export default function datadogMcpExtension(pi: ExtensionAPI): void {
   });
 
   pi.on('session_shutdown', async () => {
-    const connectedClient = client;
-    client = undefined;
-    connectionPromise = undefined;
-    discoveryPromise = undefined;
-    toolsDiscovered = false;
-    registeredToolNames.clear();
-    remoteTools.clear();
-    forwardedTools.clear();
+    await teardownDatadogLifecycle(pi);
     unregisterMcpForwardingProvider(forwardingProvider);
-
-    if (connectedClient) {
-      await connectedClient.close().catch(() => undefined);
-    }
   });
+}
+
+/**
+ * Stops every operation and client belonging to the current Datadog lifecycle.
+ *
+ * This deliberately clears the shared references before awaiting anything. Any
+ * completion that races the teardown therefore fails its generation/client
+ * guard instead of publishing state into the next session.
+ */
+async function teardownDatadogLifecycle(pi: ExtensionAPI): Promise<void> {
+  sessionShuttingDown = true;
+  sessionEpoch++;
+  lifecycleGeneration++;
+  lifecycleAbortController.abort();
+
+  const operations = new Set<Promise<unknown>>();
+  if (connectionPromise) operations.add(connectionPromise);
+  if (discoveryPromise) operations.add(discoveryPromise);
+  if (reconnectOperation?.promise) operations.add(reconnectOperation.promise);
+  const clients = new Set<Client>(pendingClients);
+  if (client) clients.add(client);
+
+  client = undefined;
+  connectionPromise = undefined;
+  discoveryPromise = undefined;
+  discoveryPromiseClient = undefined;
+  reconnectOperation = undefined;
+  resetDiscoveryState(pi);
+
+  // Closing before awaiting is important for transports whose connect/list
+  // operation only resolves after the client is closed.
+  const closeClients = async (values: Iterable<Client>): Promise<void> => {
+    await Promise.all([...values].map((connectedClient) => connectedClient.close().catch(() => undefined)));
+  };
+  await Promise.all([
+    closeClients(clients),
+    ...[...operations].map((operation) => operation.catch(() => undefined)),
+  ]);
+
+  // A pending connect can construct a client just before observing the
+  // generation change. Drain that final set as well before the new lifecycle
+  // gets a usable abort controller.
+  await closeClients(new Set<Client>(pendingClients));
+  await Promise.all([...operations].map((operation) => operation.catch(() => undefined)));
+}
+
+function resetDiscoveryState(pi: ExtensionAPI | undefined = activePi): void {
+  const staleNames = new Set([...remoteTools.keys(), ...forwardedTools.keys()]);
+  if (pi && staleNames.size > 0) {
+    pi.setActiveTools(pi.getActiveTools().filter((name) => !staleNames.has(name)));
+  }
+  toolsDiscovered = false;
+  discoveryPromiseClient = undefined;
+  discoveryClient = undefined;
+  remoteTools.clear();
+  forwardedTools.clear();
+}
+
+async function invalidateDatadogConnection(pi: ExtensionAPI): Promise<void> {
+  lifecycleAbortController.abort();
+  lifecycleGeneration++;
+  const operations = new Set<Promise<unknown>>();
+  if (connectionPromise) operations.add(connectionPromise);
+  if (discoveryPromise) operations.add(discoveryPromise);
+  const clients = new Set<Client>(pendingClients);
+  if (client) clients.add(client);
+  client = undefined;
+  connectionPromise = undefined;
+  discoveryPromise = undefined;
+  resetDiscoveryState(pi);
+  await Promise.all([
+    Promise.all([...clients].map((connectedClient) => connectedClient.close().catch(() => undefined))),
+    ...[...operations].map((operation) => operation.catch(() => undefined)),
+  ]);
+  await Promise.all([...pendingClients].map((connectedClient) => connectedClient.close().catch(() => undefined)));
+}
+
+/** Connects to Datadog without reusing a client from an earlier lifecycle. */
+async function reconnect(ctx: ExtensionContext, pi: ExtensionAPI): Promise<Client> {
+  if (sessionShuttingDown) throw new Error('Datadog MCP session is shutting down.');
+  if (reconnectOperation) return reconnectOperation.promise;
+  const epoch = sessionEpoch;
+  const pending = (async () => {
+    await invalidateDatadogConnection(pi);
+    if (sessionShuttingDown || epoch !== sessionEpoch) throw staleLifecycleError();
+    lifecycleAbortController = new AbortController();
+    return connect(ctx, true, epoch);
+  })();
+  reconnectOperation = { epoch, promise: pending };
+  try {
+    return await pending;
+  } finally {
+    if (reconnectOperation?.promise === pending) reconnectOperation = undefined;
+  }
 }
 
 /**
@@ -97,50 +310,68 @@ export default function datadogMcpExtension(pi: ExtensionAPI): void {
  * @returns The connected MCP client.
  * @throws When the CLI is unavailable or OAuth has not been completed.
  */
-async function connect(ctx: ExtensionContext): Promise<Client> {
+async function connect(ctx: ExtensionContext, allowReconnect = false, expectedSessionEpoch = sessionEpoch): Promise<Client> {
+  if (sessionShuttingDown || expectedSessionEpoch !== sessionEpoch) throw staleLifecycleError();
+  if (!allowReconnect && reconnectOperation) {
+    await reconnectOperation.promise;
+    if (sessionShuttingDown || expectedSessionEpoch !== sessionEpoch) throw staleLifecycleError();
+    if (client) return client;
+  }
   if (client) return client;
   if (connectionPromise) return connectionPromise;
 
-  connectionPromise = createConnection(ctx);
-
+  const generation = lifecycleGeneration;
+  const signal = lifecycleAbortController.signal;
+  const pending = createConnection(ctx, generation, signal, expectedSessionEpoch);
+  connectionPromise = pending;
   try {
-    return await connectionPromise;
+    return await pending;
   } finally {
-    connectionPromise = undefined;
+    if (connectionPromise === pending) connectionPromise = undefined;
   }
 }
 
-/**
- * Starts the local Datadog OAuth proxy and performs MCP initialization.
- *
- * @param ctx - The current pi extension context.
- * @returns The initialized MCP client.
- * @throws When the local proxy cannot connect to Datadog.
- */
-async function createConnection(ctx: ExtensionContext): Promise<Client> {
-  const cliPath = process.env.DD_MCP_CLI ?? DEFAULT_CLI_PATH;
-  const site = process.env.DD_MCP_SITE ?? DEFAULT_SITE;
-  const endpointPath = process.env.DD_MCP_ENDPOINT_PATH ?? DEFAULT_ENDPOINT_PATH;
+const pendingClients = new Set<Client>();
 
+function handleClientClosed(closedClient: Client, generation: number): void {
+  if (client !== closedClient || generation !== lifecycleGeneration) return;
+  client = undefined;
+  lifecycleAbortController.abort();
+  lifecycleGeneration++;
+  resetDiscoveryState();
+  lifecycleAbortController = new AbortController();
+}
+
+/** Starts the local Datadog OAuth proxy and performs MCP initialization. */
+async function createConnection(ctx: ExtensionContext, generation: number, signal: AbortSignal, expectedSessionEpoch: number): Promise<Client> {
+  const config = resolveDatadogConfig();
+  validateDatadogEndpointPath(config.endpointPath);
   const transport = new StdioClientTransport({
-    command: cliPath,
-    args: ['--site', site, '--endpoint-path', endpointPath, '--force-oauth'],
+    command: config.cliPath,
+    args: ['--site', config.site, '--endpoint-path', config.endpointPath, '--force-oauth'],
     cwd: ctx.cwd,
     stderr: 'pipe',
   });
-
-  const mcpClient = new Client({
-    name: 'pi-datadog-mcp',
-    version: '0.1.0',
-  });
-
+  const mcpClient = new Client({ name: 'pi-datadog-mcp', version: '0.1.0' });
+  let accepted = false;
+  mcpClient.onclose = () => {
+    if (accepted) handleClientClosed(mcpClient, generation);
+  };
+  pendingClients.add(mcpClient);
   try {
     await mcpClient.connect(transport);
+    accepted = true;
+    if (!isCurrentLifecycle(generation) || signal.aborted || expectedSessionEpoch !== sessionEpoch || sessionShuttingDown) {
+      await mcpClient.close().catch(() => undefined);
+      throw staleLifecycleError();
+    }
     client = mcpClient;
     return mcpClient;
   } catch (error) {
     await mcpClient.close().catch(() => undefined);
     throw error;
+  } finally {
+    pendingClients.delete(mcpClient);
   }
 }
 
@@ -162,21 +393,45 @@ export function keepDiscoveredToolsInactive(
  * @param pi - The pi extension API.
  * @returns The number of discovered Datadog tools.
  */
-export async function discoverTools(mcpClient: Client, pi: ExtensionAPI): Promise<number> {
-  if (toolsDiscovered) return remoteTools.size;
-  if (!discoveryPromise) {
-    discoveryPromise = discoverToolsOnce(mcpClient, pi).finally(() => {
+export async function discoverTools(mcpClient: Client, pi: ExtensionAPI, operationSignal?: AbortSignal): Promise<number> {
+  if (sessionShuttingDown || client !== mcpClient || operationSignal?.aborted) throw staleLifecycleError();
+  if (toolsDiscovered && discoveryClient === mcpClient) return remoteTools.size;
+  if (discoveryPromise && discoveryPromiseClient === mcpClient) return operationSignal
+    ? waitForSignal(discoveryPromise, operationSignal)
+    : discoveryPromise;
+  const generation = lifecycleGeneration;
+  const signal = operationSignal
+    ? AbortSignal.any([lifecycleAbortController.signal, operationSignal])
+    : lifecycleAbortController.signal;
+  const pending = discoverToolsOnce(mcpClient, pi, generation, signal);
+  discoveryPromise = pending;
+  discoveryPromiseClient = mcpClient;
+  try {
+    return await pending;
+  } finally {
+    if (discoveryPromise === pending) {
       discoveryPromise = undefined;
-    });
+      discoveryPromiseClient = undefined;
+    }
   }
-  return discoveryPromise;
 }
 
-async function discoverToolsOnce(mcpClient: Client, pi: ExtensionAPI): Promise<number> {
-  const result = await mcpClient.listTools();
-  const activeBeforeDiscovery = new Set(pi.getActiveTools());
+async function discoverToolsOnce(
+  mcpClient: Client,
+  pi: ExtensionAPI,
+  generation: number,
+  signal: AbortSignal,
+): Promise<number> {
+  const result = await mcpClient.listTools(undefined, { signal });
+  // A reconnect or shutdown may complete while listTools was in flight. Never
+  // publish definitions from that old client into the new registry.
+  if (!isCurrentLifecycle(generation, mcpClient) || signal.aborted) throw staleLifecycleError();
+  const previousRemoteNames = new Set(remoteTools.keys());
+  const activeBeforeDiscovery = new Set(pi.getActiveTools().filter((name) => !previousRemoteNames.has(name)));
+  if (previousRemoteNames.size > 0) pi.setActiveTools([...activeBeforeDiscovery]);
 
   for (const remoteTool of result.tools) {
+    if (!isCurrentLifecycle(generation, mcpClient) || signal.aborted) throw staleLifecycleError();
     const piToolName = toPiToolName(remoteTool.name);
     remoteTools.set(piToolName, remoteTool);
     registerTool(remoteTool, pi);
@@ -188,6 +443,7 @@ async function discoverToolsOnce(mcpClient: Client, pi: ExtensionAPI): Promise<n
   const lazyActiveTools = keepDiscoveredToolsInactive(activeAfterRegistration, activeBeforeDiscovery, new Set(remoteTools.keys()));
   if (lazyActiveTools.length !== activeAfterRegistration.length) pi.setActiveTools(lazyActiveTools);
   toolsDiscovered = true;
+  discoveryClient = mcpClient;
 
   return result.tools.length;
 }
@@ -246,12 +502,15 @@ function findToolMatches(query: string, limit: number): string[] {
  * Registers one Datadog MCP tool as a pi tool.
  *
  * @param remoteTool - The tool definition returned by Datadog.
- * @param mcpClient - The connected Datadog MCP client.
  * @param pi - The pi extension API.
  */
 function registerTool(remoteTool: McpTool, pi: ExtensionAPI): void {
   const piToolName = toPiToolName(remoteTool.name);
-  if (registeredToolNames.has(piToolName)) return;
+  // Pi does not expose tool removal. Register each name once per Pi API and
+  // resolve the current remote definition at execution time so reconnects
+  // cannot retain a stale client or leave duplicate registrations behind.
+  const registeredNames = getRegisteredToolNames(pi);
+  if (registeredNames.has(piToolName)) return;
 
   const parameters = Type.Unsafe<Record<string, unknown>>(remoteTool.inputSchema as TSchema);
 
@@ -261,11 +520,20 @@ function registerTool(remoteTool: McpTool, pi: ExtensionAPI): void {
     description: remoteTool.description ?? `Call the Datadog MCP tool ${remoteTool.name}.`,
     parameters,
     executionMode: 'sequential',
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      return callDatadogTool(remoteTool, params, ctx, signal);
+    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+      return callDatadogToolByName(piToolName, params, signal);
     },
   });
-  registeredToolNames.add(piToolName);
+  registeredNames.add(piToolName);
+}
+
+function getRegisteredToolNames(pi: ExtensionAPI): Set<string> {
+  let names = registeredToolNames.get(pi);
+  if (!names) {
+    names = new Set<string>();
+    registeredToolNames.set(pi, names);
+  }
+  return names;
 }
 
 /**
@@ -287,17 +555,18 @@ function toPiToolName(remoteName: string): string {
  */
 function createForwardingProvider(pi: ExtensionAPI): McpForwardingProvider {
   return {
-    listTools: async (ctx: ExtensionContext): Promise<ForwardedToolDefinition[]> => {
+    listTools: async (ctx: ExtensionContext, signal?: AbortSignal): Promise<ForwardedToolDefinition[]> => {
       if (isMcpForwardingChild()) {
-        return parseForwardedToolList(await requestForwardedMcp('tools/list'));
+        return parseForwardedToolList(await requestForwardedMcp('tools/list', {}, signal));
       }
-      await ensureDatadogToolsDiscovered(pi, ctx);
+      await ensureDatadogToolsDiscovered(pi, ctx, signal);
+      if (signal?.aborted) throw staleLifecycleError();
       return [...remoteTools.keys()].map((name) => toForwardedTool(name));
     },
     searchTools: (query: string, limit: number, ctx: ExtensionContext, signal?: AbortSignal) =>
       isMcpForwardingChild()
         ? requestForwardedMcp('tools/search', { query, limit }, signal).then(parseForwardedSearchResponse)
-        : searchForwardedDatadogTools(query, limit, pi, ctx),
+        : searchForwardedDatadogTools(query, limit, pi, ctx, signal),
     callTool: (name: string, arguments_: Record<string, unknown>, signal: AbortSignal | undefined, ctx: ExtensionContext) =>
       isMcpForwardingChild()
         ? requestForwardedMcp('tools/call', { name, arguments: arguments_ }, signal) as Promise<ForwardedToolResult>
@@ -312,10 +581,11 @@ function createForwardingProvider(pi: ExtensionAPI): McpForwardingProvider {
  * @param ctx - Current extension context.
  * @returns Nothing when discovery has completed.
  */
-async function ensureDatadogToolsDiscovered(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+async function ensureDatadogToolsDiscovered(pi: ExtensionAPI, ctx: ExtensionContext, signal?: AbortSignal): Promise<void> {
   if (isMcpForwardingChild()) return;
-  const connectedClient = await connect(ctx);
-  await discoverTools(connectedClient, pi);
+  const connecting = connect(ctx);
+  const connectedClient = signal ? await waitForSignal(connecting, signal) : await connecting;
+  await discoverTools(connectedClient, pi, signal);
 }
 
 /**
@@ -338,10 +608,13 @@ async function searchDatadogTools(
     const forwarded = parseForwardedSearchResponse(
       await requestForwardedMcp('tools/search', { query, limit }, signal),
     );
+    if (signal?.aborted) throw staleLifecycleError();
     for (const tool of forwarded.matches) {
+      if (signal?.aborted) throw staleLifecycleError();
       forwardedTools.set(tool.name, tool);
       registerForwardedTool(tool, pi);
     }
+    if (signal?.aborted) throw staleLifecycleError();
     const activeTools = pi.getActiveTools();
     const addedTools = forwarded.matches
       .map((tool) => tool.name)
@@ -361,7 +634,8 @@ async function searchDatadogTools(
     };
   }
 
-  await ensureDatadogToolsDiscovered(pi, ctx);
+  await ensureDatadogToolsDiscovered(pi, ctx, signal);
+  if (signal?.aborted) throw staleLifecycleError();
   const matches = findToolMatches(query, limit);
   const activeTools = pi.getActiveTools();
   const addedTools = matches.filter((name) => !activeTools.includes(name));
@@ -454,8 +728,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * @param pi - Child extension API.
  */
 function registerForwardedTool(tool: ForwardedToolDefinition, pi: ExtensionAPI): void {
-  if (!isForwardedToolDefinition(tool) || registeredToolNames.has(tool.name)) return;
-  registeredToolNames.add(tool.name);
+  if (!isForwardedToolDefinition(tool)) return;
+  const registeredNames = getRegisteredToolNames(pi);
+  if (registeredNames.has(tool.name)) return;
+  registeredNames.add(tool.name);
   pi.registerTool({
     name: tool.name,
     label: `Datadog: ${tool.name}`,
@@ -499,8 +775,10 @@ async function searchForwardedDatadogTools(
   limit: number,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
+  signal?: AbortSignal,
 ): Promise<{ matches: ForwardedToolDefinition[]; addedTools: string[] }> {
-  await ensureDatadogToolsDiscovered(pi, ctx);
+  await ensureDatadogToolsDiscovered(pi, ctx, signal);
+  if (signal?.aborted) throw staleLifecycleError();
   const matches = findToolMatches(query, limit).map((name) => toForwardedTool(name));
   return { matches, addedTools: [] };
 }
@@ -517,12 +795,23 @@ async function searchForwardedDatadogTools(
 async function callForwardedDatadogTool(
   name: string,
   arguments_: Record<string, unknown>,
-  ctx: ExtensionContext,
+  _ctx: ExtensionContext,
   signal: AbortSignal | undefined,
 ): Promise<ForwardedToolResult> {
-  const remoteTool = remoteTools.get(name);
-  if (!remoteTool) throw new Error(`Unknown Datadog tool: ${name}`);
-  return callDatadogTool(remoteTool, arguments_, ctx, signal);
+  return callDatadogToolByName(name, arguments_, signal);
+}
+
+async function callDatadogToolByName(
+  piToolName: string,
+  arguments_: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<ForwardedToolResult> {
+  const remoteTool = remoteTools.get(piToolName);
+  if (!remoteTool) throw new Error(`Datadog tool is unavailable in the current discovery: ${piToolName}`);
+  const activeClient = client;
+  if (!activeClient) throw new Error('Datadog MCP is not connected. Run /datadog-connect first.');
+  const generation = lifecycleGeneration;
+  return callDatadogTool(activeClient, remoteTool, arguments_, signal, generation);
 }
 
 /**
@@ -530,21 +819,24 @@ async function callForwardedDatadogTool(
  *
  * @param remoteTool - Datadog MCP tool definition.
  * @param arguments_ - Tool arguments.
- * @param ctx - Extension context.
  * @returns Serialized tool result.
  */
 async function callDatadogTool(
+  activeClient: Client,
   remoteTool: McpTool,
   arguments_: Record<string, unknown>,
-  ctx: ExtensionContext,
   signal: AbortSignal | undefined = undefined,
+  generation = lifecycleGeneration,
 ): Promise<ForwardedToolResult> {
-  const activeClient = await connect(ctx);
+  const callSignal = signal
+    ? AbortSignal.any([signal, lifecycleAbortController.signal])
+    : lifecycleAbortController.signal;
   const result = await activeClient.callTool(
     { name: remoteTool.name, arguments: arguments_ },
     undefined,
-    signal ? { signal } : undefined,
+    { signal: callSignal },
   );
+  if (!isCurrentLifecycle(generation, activeClient)) throw staleLifecycleError();
   const output = JSON.stringify(result, null, 2) ?? String(result);
   const truncated = truncateHead(output, {
     maxBytes: DEFAULT_MAX_BYTES,
@@ -575,7 +867,7 @@ async function callDatadogTool(
  * @param error - The caught connection error.
  * @returns A user-facing error message.
  */
-function formatConnectionError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return `Datadog MCP unavailable. Run '${DEFAULT_CLI_PATH} --site us3 login' in a terminal, then run /datadog-connect. (${message})`;
+export function formatConnectionError(error: unknown, config: DatadogConfig = resolveDatadogConfig()): string {
+  const message = redactConnectionMessage(error instanceof Error ? error.message : String(error));
+  return `Datadog MCP unavailable. Run ${shellQuote(config.cliPath)} --site ${shellQuote(config.site)} login in a terminal, then run /datadog-connect. Endpoint: ${safeEndpointPath(config.endpointPath)}. (${message})`;
 }

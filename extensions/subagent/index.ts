@@ -63,6 +63,7 @@ const SAFE_CHILD_TOOL_ALLOWLIST = [
 	"fovea_sketch", "fovea_focus", "fovea_dwell", "fovea_impact", "herdr_shell",
 ] as const;
 const SAFE_CHILD_TOOLS = new Set<string>(SAFE_CHILD_TOOL_ALLOWLIST);
+const SUPERVISOR_TOOL_NAME = "contact_supervisor";
 const RECOVERY_DIRECTORIES = new Set<string>();
 const BUNDLED_AGENTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../agents");
 
@@ -307,6 +308,14 @@ export function buildChildArgs(
 /** Bridge-provided remote names may be registered by the loader later, but must not be pre-registered. */
 export function childProcessToolNames(localToolNames: readonly string[], forwardedToolNames: readonly string[] = []): string[] {
 	return [...new Set([...localToolNames, ...forwardedToolNames])];
+}
+
+/** Adds the supervisor capability to a background child without activating forwarded tools. */
+export function backgroundChildProcessToolNames(
+	localToolNames: readonly string[],
+	forwardedToolNames: readonly string[] = [],
+): string[] {
+	return childProcessToolNames(localToolNames, [...forwardedToolNames, SUPERVISOR_TOOL_NAME]);
 }
 
 async function writeRecoveryArtifact(agentName: string, output: string): Promise<string | undefined> {
@@ -690,7 +699,7 @@ const SupervisorReportParams = Type.Object({
 function registerSupervisorTool(pi: ExtensionAPI): void {
 	if (!isSupervisorChild()) return;
 	pi.registerTool({
-		name: "contact_supervisor",
+		name: SUPERVISOR_TOOL_NAME,
 		label: "Contact Supervisor",
 		description: "Send a bounded decision request or meaningful progress update to the parent subagent supervisor. Use need_decision when blocked; use progress_update only for an important discovery. Do not use this for routine narration.",
 		parameters: SupervisorReportParams,
@@ -776,6 +785,7 @@ function registerBackgroundManagementTools(pi: ExtensionAPI, manager: Background
 export default function (pi: ExtensionAPI) {
 	registerSupervisorTool(pi);
 	const backgroundTasks = new BackgroundTaskManager();
+	let sessionAbortController = new AbortController();
 	const updateBackgroundStatus = (ctx: ExtensionContext): void => {
 		if (!ctx.hasUI) return;
 		const running = backgroundTasks.list().filter((task) => task.status === "starting" || task.status === "running").length;
@@ -783,6 +793,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	registerBackgroundManagementTools(pi, backgroundTasks);
 	pi.on("session_start", async (_event, ctx) => {
+		if (sessionAbortController.signal.aborted) sessionAbortController = new AbortController();
 		try {
 			await installBundledAgents();
 		} catch (error) {
@@ -791,6 +802,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		sessionAbortController.abort();
 		await backgroundTasks.shutdown();
 		await Promise.all([...RECOVERY_DIRECTORIES].map((dir) => fs.promises.rm(dir, { recursive: true, force: true }).catch(() => undefined)));
 		RECOVERY_DIRECTORIES.clear();
@@ -813,6 +825,10 @@ export default function (pi: ExtensionAPI) {
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const sessionSignal = sessionAbortController.signal;
+			const operationSignal = signal
+				? AbortSignal.any([signal, sessionSignal])
+				: sessionSignal;
 			const agentScope: AgentScope = params.agentScope ?? "user";
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
@@ -906,21 +922,33 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				const taskId = randomUUID().slice(0, 8);
-				const supervisorBridge = await createSupervisorBridge(taskId, (report) => {
-					backgroundTasks.addReport(taskId, report);
-					updateBackgroundStatus(ctx);
-					pi.sendMessage({
-						customType: "subagent-supervisor-report",
-						content: `[Subagent ${taskId} ${report.kind}]\n\n${report.message}`,
-						display: true,
-						details: report,
-					}, { deliverAs: "followUp", triggerTurn: report.kind === "need_decision" });
-				});
+
+				let supervisorBridge: SupervisorBridge;
+				try {
+					supervisorBridge = await createSupervisorBridge(taskId, (report) => {
+						if (sessionSignal.aborted) return;
+						backgroundTasks.addReport(taskId, report);
+						updateBackgroundStatus(ctx);
+						pi.sendMessage({
+							customType: "subagent-supervisor-report",
+							content: `[Subagent ${taskId} ${report.kind}]\n\n${report.message}`,
+							display: true,
+							details: report,
+						}, { deliverAs: "followUp", triggerTurn: report.kind === "need_decision" });
+					}, operationSignal, sessionSignal);
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: `Could not start background subagent: ${error instanceof Error ? error.message : String(error)}` }],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
+				}
 				let forwardingBridge: McpForwardingBridge | undefined;
 				let promptDir: string | undefined;
 				let promptPath: string | undefined;
 				try {
-					if (forwardingProvider) forwardingBridge = await createMcpForwardingBridge(forwardingProvider, ctx, undefined);
+					if (forwardingProvider) forwardingBridge = await createMcpForwardingBridge(forwardingProvider, ctx, operationSignal, sessionSignal);
+					if (operationSignal.aborted) throw new Error("Background subagent startup was aborted.");
 					const availableModels = ctx.modelRegistry.getAvailable().map((model) => ({ provider: model.provider, id: model.id }));
 					const resolved = resolveAgentModel(agent, ctx.model ?? {}, params.modelTier, availableModels);
 					const childArgs = ["--mode", "rpc", "--no-session"];
@@ -928,7 +956,7 @@ export default function (pi: ExtensionAPI) {
 						childArgs.push("--model", resolved.model);
 						if (resolved.source === "parent" && ctx.thinkingLevel) childArgs.push("--thinking", ctx.thinkingLevel);
 					}
-					childArgs.push("--tools", childProcessToolNames(toolNames, ["contact_supervisor"]).join(","));
+					childArgs.push("--tools", backgroundChildProcessToolNames(toolNames, forwardingBridge?.toolNames).join(","));
 					if (agent.systemPrompt.trim()) {
 						const prompt = await writePromptToTempFile(agent.name, agent.systemPrompt);
 						promptDir = prompt.dir;
@@ -941,6 +969,7 @@ export default function (pi: ExtensionAPI) {
 							await Promise.all([supervisorBridge.close(), forwardingBridge?.close()]);
 						},
 					};
+					if (operationSignal.aborted) throw new Error("Background subagent startup was aborted.");
 					const snapshot = await backgroundTasks.start({
 						id: taskId,
 						agent: agent.name,
@@ -950,10 +979,12 @@ export default function (pi: ExtensionAPI) {
 						command: "pi",
 						args: childArgs,
 						env: { ...process.env, ...bridge.env },
+						signal: operationSignal,
 						model: resolved.model,
 						bridge,
 						onReport: () => undefined,
 						onSettled: (completed) => {
+							if (sessionSignal.aborted) return;
 							updateBackgroundStatus(ctx);
 							pi.sendMessage({
 								customType: "subagent-complete",
@@ -1017,7 +1048,7 @@ export default function (pi: ExtensionAPI) {
 						step.modelTier ?? params.modelTier,
 						step.cwd,
 						i + 1,
-						signal,
+						operationSignal,
 						chainUpdate,
 					);
 					await finalizeResult(result);
@@ -1092,7 +1123,7 @@ export default function (pi: ExtensionAPI) {
 						t.modelTier ?? params.modelTier,
 						t.cwd,
 						undefined,
-						signal,
+						operationSignal,
 						// Per-task update callback
 						(current) => {
 							allResults[index] = current;
@@ -1134,7 +1165,7 @@ export default function (pi: ExtensionAPI) {
 					params.modelTier,
 					params.cwd,
 					undefined,
-					signal,
+					operationSignal,
 					(current) => onUpdate?.({
 						content: [{ type: "text", text: compactResult(current).output || "(running...)" }],
 						details: makeDetails("single")([current]),
