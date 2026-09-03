@@ -33,6 +33,23 @@ test("model resolution gives explicit tiers precedence over agent defaults and e
 	});
 });
 
+test("tier routes fall back to the active parent model when unavailable", () => {
+	assert.deepEqual(resolveAgentModel({ name: "scout", modelTier: "fast" }, { provider: "github-copilot", id: "gpt-5.6-luna" }, undefined, [
+		{ provider: "github-copilot", id: "gpt-5.6-luna" },
+	]), {
+		model: "github-copilot/gpt-5.6-luna",
+		tier: "fast",
+		source: "parent",
+	});
+	assert.deepEqual(resolveAgentModel({ name: "scout", modelTier: "fast" }, { provider: "github-copilot", id: "gpt-5.6-luna" }, undefined, [
+		{ provider: "openai", id: "gpt-5.6-luna" },
+	]), {
+		model: "openai/gpt-5.6-luna",
+		tier: "fast",
+		source: "tier",
+	});
+});
+
 test("legacy exact models and parent models remain fallbacks", () => {
 	assert.deepEqual(resolveAgentModel({ name: "custom", model: "custom/provider-model" }, { provider: "openai", id: "gpt-5.6" }), {
 		model: "custom/provider-model",

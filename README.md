@@ -46,7 +46,7 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Full Markdown plans in Plan mode; compact checklist-only tracking outside Plan mode
   - Plan mode keeps non-code-changing tools available, including notes, memory, Fovea, Herdr inspection, Datadog investigation, and scheduled tasks
   - Project code mutation tools and unsafe shell commands remain blocked in Plan mode
-  - Decision-first plan format: scope and conclusion first, key decisions, rationale, trade-offs, risks, and next decision
+  - Research first: Plan mode is for the final decision and execution contract, not initial research; scope and conclusion first, key decisions, rationale, trade-offs, risks, and next decision
 - Memory
   - Local SQLite-backed user and project memories
   - Main-agent-driven capture of stable patterns noticed during normal work
@@ -266,6 +266,22 @@ Implementation workflows are also available:
 ```
 
 The setup installs missing default agent definitions into `~/.pi/agent/agents/` without overwriting existing files. Project-local agents remain opt-in and require confirmation. Existing custom agents may keep an exact `model:` value; agents without `modelTier` retain that legacy model. Because installed defaults are never overwritten, remove or update an existing copied agent definition if you want the new bundled tier preset to take effect.
+
+### Background subagents
+
+The `subagent` tool keeps its existing synchronous behavior by default. Single-agent tasks run in the background by default and return immediately with a task ID. Set `background: false` when the parent needs an inline result. The main conversation remains usable while the child works:
+
+```text
+subagent({ agent: "scout", task: "Inspect the authentication flow", background: true })
+get_subagent_status({})
+send_subagent_message({ taskId: "abcd1234", message: "Also check the migration scripts", delivery: "followUp" })
+get_subagent_result({ taskId: "abcd1234" })
+cancel_subagent({ taskId: "abcd1234" })
+```
+
+Background tasks are scoped to the current Pi session and are stopped on reload, session replacement, or shutdown. Existing chains remain synchronous because each step depends on the previous result. Their intermediate output stays outside the parent context. The final bounded result is delivered back to the parent, and a child can use the child-only `contact_supervisor` tool for an important progress update or decision request. The parent can answer by sending a follow-up message with the task ID.
+
+Background workers share the selected working directory, so do not run concurrent write-capable agents against the same files unless you have an explicit coordination strategy. Worktree isolation and direct child-to-child team messaging are intentionally not part of this workflow.
 
 ### Herdr agent state integration
 

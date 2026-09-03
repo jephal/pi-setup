@@ -13,6 +13,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,6 +33,8 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withHerdrBlock } from "../herdr-blocking.ts";
+import { BackgroundTaskManager, type BackgroundDelivery, type BackgroundTaskSnapshot } from "./background.ts";
+import { createSupervisorBridge, isSupervisorChild, sendSupervisorReport, type SupervisorBridge } from "./supervisor-bridge.ts";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 import { MODEL_ROUTE_SUMMARY, MODEL_SELECTION_GUIDANCE, MODEL_TIERS, type ModelTier, resolveAgentModel } from "./models.ts";
 import {
@@ -288,11 +291,12 @@ export function unsupportedChildToolNames(agent: AgentConfig): string[] {
 /** Builds child CLI arguments while retaining legacy parent model and thinking defaults. */
 export function buildChildArgs(
 	agent: Pick<AgentConfig, "model"> & Partial<Pick<AgentConfig, "name" | "modelTier">>,
-	parentCtx: Pick<ExtensionContext, "model" | "thinkingLevel">,
+	parentCtx: Pick<ExtensionContext, "model" | "thinkingLevel" | "modelRegistry">,
 	overrideTier?: ModelTier,
 ): string[] {
 	const args = ["--mode", "json", "-p", "--no-session"];
-	const resolved = resolveAgentModel(agent, parentCtx.model ?? {}, overrideTier);
+	const availableModels = parentCtx.modelRegistry?.getAvailable().map((model) => ({ provider: model.provider, id: model.id }));
+	const resolved = resolveAgentModel(agent, parentCtx.model ?? {}, overrideTier, availableModels);
 	if (resolved.model) {
 		args.push("--model", resolved.model);
 		if (resolved.source === "parent" && parentCtx.thinkingLevel) args.push("--thinking", parentCtx.thinkingLevel);
@@ -672,10 +676,112 @@ const SubagentParams = Type.Object({
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
 	),
+	background: Type.Optional(Type.Boolean({ description: "Run a single agent in the background and return a task ID immediately." })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 });
 
+const SupervisorReportParams = Type.Object({
+	message: Type.String({ description: "Bounded message for the parent agent" }),
+	kind: StringEnum(["need_decision", "progress_update"] as const, {
+		description: "Whether the parent must decide something or this is a non-blocking progress update.",
+	}),
+});
+
+function registerSupervisorTool(pi: ExtensionAPI): void {
+	if (!isSupervisorChild()) return;
+	pi.registerTool({
+		name: "contact_supervisor",
+		label: "Contact Supervisor",
+		description: "Send a bounded decision request or meaningful progress update to the parent subagent supervisor. Use need_decision when blocked; use progress_update only for an important discovery. Do not use this for routine narration.",
+		parameters: SupervisorReportParams,
+		async execute(_toolCallId, params, signal) {
+			try {
+				await sendSupervisorReport(params.message, params.kind, signal);
+				return { content: [{ type: "text", text: "Report delivered to the parent supervisor." }] };
+			} catch (error) {
+				throw new Error(error instanceof Error ? error.message : String(error));
+			}
+		},
+	});
+}
+
+const BackgroundTaskIdParams = Type.Object({
+	taskId: Type.String({ description: "Task ID returned by a background subagent invocation" }),
+});
+
+function snapshotText(snapshot: BackgroundTaskSnapshot): string {
+	const report = snapshot.reports.length ? ` reports:${snapshot.reports.length}` : "";
+	const error = snapshot.errorMessage ? ` error:${snapshot.errorMessage}` : "";
+	return `${snapshot.id} ${snapshot.agent} ${snapshot.status} (${snapshot.cwd})${report}${error}`;
+}
+
+function registerBackgroundManagementTools(pi: ExtensionAPI, manager: BackgroundTaskManager): void {
+	if (isSupervisorChild()) return;
+	pi.registerTool({
+		name: "get_subagent_status",
+		label: "Subagent Status",
+		description: "Inspect owned background subagent tasks. Omit taskId to list all active and recent tasks.",
+		parameters: Type.Object({ taskId: Type.Optional(BackgroundTaskIdParams.properties.taskId) }),
+		async execute(_toolCallId, params) {
+			const tasks = params.taskId ? [manager.get(params.taskId)].filter(Boolean) as BackgroundTaskSnapshot[] : manager.list();
+			if (!tasks.length) return { content: [{ type: "text", text: params.taskId ? `Background task ${params.taskId} was not found.` : "No background subagent tasks." }], isError: Boolean(params.taskId) };
+			return { content: [{ type: "text", text: tasks.map(snapshotText).join("\n") }], details: { tasks } };
+		},
+	});
+	pi.registerTool({
+		name: "get_subagent_result",
+		label: "Subagent Result",
+		description: "Retrieve the bounded current or final output of an owned background subagent. This does not wait for a running task.",
+		parameters: BackgroundTaskIdParams,
+		async execute(_toolCallId, params) {
+			const task = manager.get(params.taskId);
+			if (!task) return { content: [{ type: "text", text: `Background task ${params.taskId} was not found.` }], isError: true };
+			return { content: [{ type: "text", text: `Task ${task.id} ${task.status}:\n\n${task.output || "(no output yet)"}` }], details: task };
+		},
+	});
+	pi.registerTool({
+		name: "send_subagent_message",
+		label: "Send Subagent Message",
+		description: "Send additional context to a live background subagent while preserving its context. Use steer to redirect now or followUp to add work after its current turn.",
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Background task ID" }),
+			message: Type.String({ description: "Non-empty bounded message" }),
+			delivery: StringEnum(["steer", "followUp"] as const, { description: "Delivery mode" }),
+		}),
+		async execute(_toolCallId, params) {
+			try {
+				const task = await manager.send(params.taskId, params.message, params.delivery as BackgroundDelivery);
+				return { content: [{ type: "text", text: `Sent message to ${task.id}; child is ${task.status}.` }], details: task };
+			} catch (error) {
+				return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
+			}
+		},
+	});
+	pi.registerTool({
+		name: "cancel_subagent",
+		label: "Cancel Subagent",
+		description: "Cancel an owned background subagent. Cancellation is idempotent.",
+		parameters: BackgroundTaskIdParams,
+		async execute(_toolCallId, params) {
+			try {
+				const task = await manager.cancel(params.taskId);
+				return { content: [{ type: "text", text: `Cancelled background task ${task.id}.` }], details: task };
+			} catch (error) {
+				return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
+			}
+		},
+	});
+}
+
 export default function (pi: ExtensionAPI) {
+	registerSupervisorTool(pi);
+	const backgroundTasks = new BackgroundTaskManager();
+	const updateBackgroundStatus = (ctx: ExtensionContext): void => {
+		if (!ctx.hasUI) return;
+		const running = backgroundTasks.list().filter((task) => task.status === "starting" || task.status === "running").length;
+		ctx.ui.setStatus("subagents", running ? `${running} background subagent${running === 1 ? "" : "s"} running` : undefined);
+	};
+	registerBackgroundManagementTools(pi, backgroundTasks);
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			await installBundledAgents();
@@ -685,6 +791,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		await backgroundTasks.shutdown();
 		await Promise.all([...RECOVERY_DIRECTORIES].map((dir) => fs.promises.rm(dir, { recursive: true, force: true }).catch(() => undefined)));
 		RECOVERY_DIRECTORIES.clear();
 	});
@@ -692,10 +799,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: `Delegate large or context-heavy work to isolated agents; handle small edits directly. Modes: single, parallel for independent work, or chain with {previous}. Children cannot delegate. Available bundled agents (use these exact names): ${BUNDLED_AGENT_GUIDANCE}. Default scope: user; use both or project for ${CONFIG_DIR_NAME}/agents to include custom project agents.`,
+		description: `Delegate large or context-heavy work to isolated agents; handle small edits directly. Modes: single, parallel for independent work, or chain with {previous}. Single-agent calls run in the background by default so the main conversation continues immediately; set background: false when an inline result is required. Use get_subagent_status, get_subagent_result, send_subagent_message, and cancel_subagent to manage background work. Background children can contact the parent with contact_supervisor. Children cannot delegate or message peer children. Available bundled agents (use these exact names): ${BUNDLED_AGENT_GUIDANCE}. Default scope: user; use both or project for ${CONFIG_DIR_NAME}/agents to include custom project agents.`,
 		promptSnippet: "Delegate large or parallelizable work to isolated subagents",
 		promptGuidelines: [
 			"For substantial implementation, chain a worker, reviewer, then worker to apply review feedback.",
+			"Single-agent calls run in the background by default; set background: false only when the caller needs an inline result before continuing. Chains remain synchronous because they depend on handoffs.",
+			"Use send_subagent_message to add context to a running child; use the child-only contact_supervisor channel for important child-to-parent reports or decisions.",
 			"Choose fast for reconnaissance and clear low-risk work; use medium by default; choose complex only for ambiguity, security or concurrency risk, difficult debugging, high-cost failure, or a failed medium attempt.",
 			"In chains and parallel batches, set modelTier only on the step that needs escalation; do not make the whole workflow complex because one task is risky.",
 			MODEL_SELECTION_GUIDANCE,
@@ -713,6 +822,7 @@ export default function (pi: ExtensionAPI) {
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
 			const hasSingle = Boolean(params.agent && params.task);
 			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
+			const runInBackground = params.background ?? (hasSingle && !hasChain && !hasTasks);
 
 			const makeDetails =
 				(mode: "single" | "parallel" | "chain") =>
@@ -758,6 +868,117 @@ export default function (pi: ExtensionAPI) {
 							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
 							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
 						};
+				}
+			}
+
+			if (runInBackground) {
+				if (!hasSingle || hasChain || hasTasks) {
+					return {
+						content: [{ type: "text", text: "Background mode currently supports exactly one agent and task." }],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
+				}
+				const agent = agents.find((candidate) => candidate.name === params.agent);
+				if (!agent) {
+					return {
+						content: [{ type: "text", text: `Unknown agent: ${params.agent}.` }],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
+				}
+				const toolNames = childToolNames(agent);
+				if (toolNames.length === 0) {
+					return {
+						content: [{ type: "text", text: "The agent has no child-safe tools configured." }],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
+				}
+				const requiresDatadogForwarding = toolNames.includes("datadog_search_tools");
+				const forwardingProvider = requiresDatadogForwarding ? getMcpForwardingProvider() : undefined;
+				if (requiresDatadogForwarding && !forwardingProvider) {
+					return {
+						content: [{ type: "text", text: "Datadog MCP forwarding is unavailable in the parent session." }],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
+				}
+
+				const taskId = randomUUID().slice(0, 8);
+				const supervisorBridge = await createSupervisorBridge(taskId, (report) => {
+					backgroundTasks.addReport(taskId, report);
+					updateBackgroundStatus(ctx);
+					pi.sendMessage({
+						customType: "subagent-supervisor-report",
+						content: `[Subagent ${taskId} ${report.kind}]\n\n${report.message}`,
+						display: true,
+						details: report,
+					}, { deliverAs: "followUp", triggerTurn: report.kind === "need_decision" });
+				});
+				let forwardingBridge: McpForwardingBridge | undefined;
+				let promptDir: string | undefined;
+				let promptPath: string | undefined;
+				try {
+					if (forwardingProvider) forwardingBridge = await createMcpForwardingBridge(forwardingProvider, ctx, undefined);
+					const availableModels = ctx.modelRegistry.getAvailable().map((model) => ({ provider: model.provider, id: model.id }));
+					const resolved = resolveAgentModel(agent, ctx.model ?? {}, params.modelTier, availableModels);
+					const childArgs = ["--mode", "rpc", "--no-session"];
+					if (resolved.model) {
+						childArgs.push("--model", resolved.model);
+						if (resolved.source === "parent" && ctx.thinkingLevel) childArgs.push("--thinking", ctx.thinkingLevel);
+					}
+					childArgs.push("--tools", childProcessToolNames(toolNames, ["contact_supervisor"]).join(","));
+					if (agent.systemPrompt.trim()) {
+						const prompt = await writePromptToTempFile(agent.name, agent.systemPrompt);
+						promptDir = prompt.dir;
+						promptPath = prompt.filePath;
+						childArgs.push("--append-system-prompt", promptPath);
+					}
+					const bridge: SupervisorBridge = {
+						env: { ...supervisorBridge.env, ...(forwardingBridge?.env ?? {}) },
+						async close() {
+							await Promise.all([supervisorBridge.close(), forwardingBridge?.close()]);
+						},
+					};
+					const snapshot = await backgroundTasks.start({
+						id: taskId,
+						agent: agent.name,
+						agentSource: agent.source,
+						task: params.task!,
+						cwd: params.cwd ?? ctx.cwd,
+						command: "pi",
+						args: childArgs,
+						env: { ...process.env, ...bridge.env },
+						model: resolved.model,
+						bridge,
+						onReport: () => undefined,
+						onSettled: (completed) => {
+							updateBackgroundStatus(ctx);
+							pi.sendMessage({
+								customType: "subagent-complete",
+								content: `[Subagent ${completed.id} ${completed.status}]\n\n${completed.output || "(no output)"}`,
+								display: true,
+								details: completed,
+							}, { deliverAs: "followUp", triggerTurn: true });
+						},
+					});
+					updateBackgroundStatus(ctx);
+					return {
+						content: [{ type: "text", text: `Background subagent ${snapshot.id} started. The main agent can continue; use get_subagent_status, send_subagent_message, or cancel_subagent.` }],
+						details: { mode: "single", status: "started", taskId: snapshot.id, agent: snapshot.agent, model: snapshot.model },
+					};
+				} catch (error) {
+					await supervisorBridge.close().catch(() => undefined);
+					await forwardingBridge?.close().catch(() => undefined);
+					return {
+						content: [{ type: "text", text: `Could not start background subagent: ${error instanceof Error ? error.message : String(error)}` }],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
+				} finally {
+					if (promptPath) await fs.promises.unlink(promptPath).catch(() => undefined);
+					if (promptDir) await fs.promises.rmdir(promptDir).catch(() => undefined);
 				}
 			}
 
