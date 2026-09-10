@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HerdrClient } from "./herdr-client.ts";
 import { HerdrError } from "./herdr-client.ts";
-import herdrShellExtension, { createPane, discoveredNotesBinding, extractCurrentContext, getHerdrContext, getPaneProcessInfo, hasLostGenericShellOwnership, isShellForeground, reconcileLivePaneSnapshot, runPaneCommandWithRecovery } from "./herdr-shell.ts";
+import herdrShellExtension, { createPane, discoveredNotesBinding, extractCurrentContext, getHerdrContext, getPaneProcessInfo, hasLostGenericShellOwnership, herdrShellBindingKey, isShellForeground, reconcileLivePaneSnapshot, runPaneCommandWithRecovery } from "./herdr-shell.ts";
 
 function binding(paneId: string, role: "generic-shell" | "notes-viewer" = "generic-shell") {
   return {
@@ -61,6 +61,13 @@ test("uses installed --pane argv for every process-info lookup", async () => {
 
 test("fails closed when the current context does not identify a tab", () => {
   assert.equal(extractCurrentContext({ pane: { pane_id: "w1:p1", workspace_id: "w1" } }), undefined);
+});
+
+test("scopes generic shell bindings to the owning Pi pane", () => {
+  const first = herdrShellBindingKey({ workspaceId: "w1", parentTabId: "w1:t1", paneId: "w1:p1" }, "/repo");
+  const second = herdrShellBindingKey({ workspaceId: "w1", parentTabId: "w1:t1", paneId: "w1:p2" }, "/repo");
+  assert.notEqual(first, second);
+  assert.equal(first, "generic-shell|w1|w1:t1|w1:p1|/repo");
 });
 
 test("accepts only the pane shell as a safe foreground command target", () => {
