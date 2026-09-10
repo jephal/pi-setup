@@ -11,6 +11,8 @@ export interface HerdrBinding {
   role: HerdrBindingRole;
   workspaceId: string;
   parentTabId?: string;
+  /** The Herdr pane running the owning Pi agent. */
+  ownerPaneId?: string;
   paneId: string;
   terminalId?: string;
   cwd: string;
@@ -40,6 +42,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isBinding(value: unknown): value is HerdrBinding {
   if (!isRecord(value)) return false;
   return ["key", "workspaceId", "paneId", "cwd", "createdAt", "updatedAt"].every((key) => typeof value[key] === "string") &&
+    (value.ownerPaneId === undefined || typeof value.ownerPaneId === "string") &&
     (value.role === "generic-shell" || value.role === "notes-viewer");
 }
 

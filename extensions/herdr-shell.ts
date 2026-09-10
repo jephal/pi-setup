@@ -51,7 +51,7 @@ function describeCommand(command: string | undefined): string {
   return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
 }
 function toolResult(text: string, details: Record<string, unknown> = {}) { return { content: [{ type: "text" as const, text }], details }; }
-function bindingDetails(binding: HerdrBinding) { return { paneId: binding.paneId, terminalId: binding.terminalId, workspaceId: binding.workspaceId, parentTabId: binding.parentTabId, role: binding.role }; }
+function bindingDetails(binding: HerdrBinding) { return { paneId: binding.paneId, ownerPaneId: binding.ownerPaneId, terminalId: binding.terminalId, workspaceId: binding.workspaceId, parentTabId: binding.parentTabId, role: binding.role }; }
 
 export function truncateHerdrOutput(output: string, maxLines: number) {
   const sanitized = output.replace(/\r\n?/g, "\n").replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
@@ -92,9 +92,17 @@ export async function getHerdrContext(client: HerdrClient): Promise<HerdrContext
   return context;
 }
 
-function bindingKey(context: HerdrContext, cwd: string, role = SHELL_ROLE): string {
+export function herdrShellBindingKey(context: HerdrContext, cwd: string, role = SHELL_ROLE): string {
   if (!context.parentTabId) throw new Error("Cannot bind a Herdr pane without its parent tab identifier.");
-  return `${role}|${context.workspaceId}|${context.parentTabId}|${cwd}`;
+  if (!context.paneId) throw new Error("Cannot bind a Herdr pane without its owning Pi pane identifier.");
+  return `${role}|${context.workspaceId}|${context.parentTabId}|${context.paneId}|${cwd}`;
+}
+function bindingKey(context: HerdrContext, cwd: string, role = SHELL_ROLE): string {
+  return herdrShellBindingKey(context, cwd, role);
+}
+function isLegacyGenericShellBinding(binding: HerdrBinding, context: HerdrContext, cwd: string): boolean {
+  return binding.role === SHELL_ROLE && binding.ownerPaneId === undefined &&
+    binding.workspaceId === context.workspaceId && binding.parentTabId === context.parentTabId && binding.cwd === cwd;
 }
 function notesBindingKey(root: string): string { return `${NOTES_ROLE}|${root}`; }
 async function ensureSupportedHerdr(client: HerdrClient): Promise<string> {
@@ -218,7 +226,18 @@ async function waitForShellReady(client: HerdrClient, binding: HerdrBinding, sig
 async function createOwnedPane(client: HerdrClient, context: HerdrContext, cwd: string, role: HerdrBindingRole, key: string, signal?: AbortSignal): Promise<HerdrBinding> {
   const created = await createPane(client, context, cwd, signal);
   const now = new Date().toISOString();
-  const provisional: HerdrBinding = { key, role, workspaceId: created.workspaceId, parentTabId: context.parentTabId, paneId: created.paneId, terminalId: created.terminalId, cwd, createdAt: now, updatedAt: now };
+  const provisional: HerdrBinding = {
+    key,
+    role,
+    workspaceId: created.workspaceId,
+    parentTabId: context.parentTabId,
+    ...(role === SHELL_ROLE && context.paneId ? { ownerPaneId: context.paneId } : {}),
+    paneId: created.paneId,
+    terminalId: created.terminalId,
+    cwd,
+    createdAt: now,
+    updatedAt: now,
+  };
   try {
     const inspection = await waitForShellReady(client, provisional, signal);
     const binding = { ...provisional, ...(inspection.terminalId ? { terminalId: inspection.terminalId } : {}) };
@@ -232,8 +251,15 @@ async function createOwnedPane(client: HerdrClient, context: HerdrContext, cwd: 
 }
 
 async function getOrCreateShellPane(client: HerdrClient, context: HerdrContext, cwd: string, signal?: AbortSignal, onCreated?: (binding: HerdrBinding) => void): Promise<HerdrBinding> {
+  const bindings = await readHerdrBindings();
   const key = bindingKey(context, cwd);
-  const existing = (await readHerdrBindings()).get(key);
+  // Version-3 records created before per-agent ownership have no owner pane
+  // identity. Never adopt one for the current agent; retire only the state
+  // record and leave the live pane untouched so a running process is safe.
+  for (const legacy of [...bindings.values()].filter((binding) => isLegacyGenericShellBinding(binding, context, cwd))) {
+    await removeHerdrBinding(legacy.key, legacy.paneId);
+  }
+  const existing = bindings.get(key);
   if (existing?.role === SHELL_ROLE) {
     const inspected = await inspectBinding(client, existing, signal);
     if (inspected && hasLostGenericShellOwnership(existing, inspected)) {
@@ -459,7 +485,7 @@ export function reconcileLivePaneSnapshot(bindings: Map<string, HerdrBinding>, l
     const updatedAt = Date.parse(binding.updatedAt);
     if (!Number.isFinite(updatedAt) || updatedAt >= snapshotTakenAt) continue;
     const pane = live.get(binding.paneId);
-    if (!pane || !bindingScopeMatches(pane, binding)) {
+    if (!pane || !bindingScopeMatches(pane, binding) || (binding.ownerPaneId !== undefined && !live.has(binding.ownerPaneId))) {
       bindings.delete(key);
       continue;
     }
@@ -478,12 +504,14 @@ async function reconcileEvent(event: HerdrEventEnvelope): Promise<void> {
   const paneId = getString(data, "pane_id", "previous_pane_id");
   const tabId = getString(data, "tab_id");
   const workspaceId = getString(data, "workspace_id");
+  const previousPaneId = getString(data, "previous_pane_id");
   await updateHerdrBindings((bindings) => {
     for (const [key, binding] of bindings) {
-      if ((event.event === "pane.closed" || event.event === "pane.exited") && paneId !== undefined && binding.paneId === paneId) bindings.delete(key);
+      if ((event.event === "pane.closed" || event.event === "pane.exited") && paneId !== undefined && (binding.paneId === paneId || binding.ownerPaneId === paneId)) bindings.delete(key);
       if (event.event === "tab.closed" && tabId !== undefined && binding.parentTabId === tabId) bindings.delete(key);
       if (event.event === "workspace.closed" && workspaceId !== undefined && binding.workspaceId === workspaceId) bindings.delete(key);
-      if (event.event === "pane.moved" && binding.paneId === getString(data, "previous_pane_id")) {
+      if (event.event === "pane.moved" && previousPaneId !== undefined && binding.ownerPaneId === previousPaneId) bindings.delete(key);
+      if (event.event === "pane.moved" && previousPaneId !== undefined && binding.paneId === previousPaneId) {
         const moved = getRecord(data, "pane");
         if (binding.role === NOTES_ROLE && moved) bindings.set(key, { ...binding, paneId: getString(moved, "pane_id") ?? binding.paneId, terminalId: getString(moved, "terminal_id") ?? binding.terminalId, workspaceId: getString(moved, "workspace_id") ?? binding.workspaceId, parentTabId: getString(moved, "tab_id") ?? binding.parentTabId, updatedAt: new Date().toISOString() });
         else bindings.delete(key);
@@ -514,8 +542,8 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
       // by the supported list API when a socket is unavailable or reconnecting.
       reconcileTimer = setInterval(() => {
         void enqueue(async () => {
-          const listed = await client.run(["pane", "list"], { timeout: 5_000 });
           const snapshotTakenAt = Date.now();
+          const listed = await client.run(["pane", "list"], { timeout: 5_000 });
           const live = new Map(listedPanes(listed).flatMap((pane) => {
             const paneId = extractPaneId(pane);
             return paneId ? [[paneId, pane] as const] : [];
