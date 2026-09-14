@@ -43,6 +43,7 @@
   },
   "pi": {
     "extensions": [
+      "extensions/temp-storage.ts",
       "extensions/subagent/index.ts",
       "extensions/ask-questions.ts",
       "extensions/plan-mode.ts",
