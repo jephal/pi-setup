@@ -770,24 +770,26 @@ function registerBackgroundManagementTools(pi: ExtensionAPI, manager: Background
 	pi.registerTool({
 		name: "get_subagent_result",
 		label: "Subagent Result",
-		description: "Retrieve the bounded current or final output of one owned background subagent. This does not wait for a running task.",
+		description: "Retrieve one owned background subagent result. The first terminal read returns bounded detailed output and consumes it; repeated reads return compact continuation state. This does not wait for a running task.",
 		parameters: BackgroundTaskIdParams,
 		async execute(_toolCallId, params) {
-			const task = manager.get(params.taskId);
-			if (!task) return { content: [{ type: "text", text: `Background task ${params.taskId} was not found.` }], isError: true };
-			return { content: [{ type: "text", text: `Task ${task.id} ${task.status}:\n\n${task.output || "(no output yet)"}` }], details: task };
+			const result = manager.consumeResult(params.taskId);
+			if (!result) return { content: [{ type: "text", text: `Background task ${params.taskId} was not found.` }], isError: true };
+			const task = result.snapshot;
+			const prefix = result.consumed ? "Compact continuation state (detailed result already consumed)" : "Detailed result";
+			return { content: [{ type: "text", text: `Task ${task.id} ${task.status} — ${prefix}:\n\n${task.output || "(no output yet)"}` }], details: task };
 		},
 	});
 	pi.registerTool({
 		name: "get_subagent_batch_result",
 		label: "Subagent Batch Result",
-		description: "Retrieve all bounded outputs and diagnostics for a background batch in one call after its automatic completion notification.",
+		description: "Retrieve all bounded outputs and diagnostics for a background batch. The first terminal read consumes detailed task output; repeated reads return compact stable snapshots.",
 		parameters: BackgroundBatchIdParams,
 		async execute(_toolCallId, params) {
-			const batch = manager.getBatch(params.batchId);
-			if (!batch) return { content: [{ type: "text", text: `Background batch ${params.batchId} was not found.` }], isError: true };
-			const tasks = manager.getBatchTasks(batch.id);
-			const aggregate = `${batchText(batch)}\n\n${tasks.map((task) => `### ${task.agent} ${task.status} (${task.id})${task.model ? ` [${task.model}]` : ""}\n\n${task.output || "(no output yet)"}${task.stderr ? `\n\nDiagnostics:\n${task.stderr}` : ""}${task.errorMessage ? `\n\nError: ${task.errorMessage}` : ""}`).join("\n\n---\n\n")}`;
+			const result = manager.consumeBatchResult(params.batchId);
+			if (!result) return { content: [{ type: "text", text: `Background batch ${params.batchId} was not found.` }], isError: true };
+			const { batch, tasks } = result;
+			const aggregate = `${batchText(batch)}${result.consumed ? " (compact continuation state)" : ""}\n\n${tasks.map((task) => `### ${task.agent} ${task.status} (${task.id})${task.model ? ` [${task.model}]` : ""}\n\n${task.output || "(no output yet)"}${task.stderr ? `\n\nDiagnostics:\n${task.stderr}` : ""}${task.errorMessage ? `\n\nError: ${task.errorMessage}` : ""}`).join("\n\n---\n\n")}`;
 			const bounded = boundHeadText(aggregate, BATCH_RESULT_BYTES - BATCH_RESULT_MARKER_RESERVE_BYTES, BATCH_RESULT_LINES - BATCH_RESULT_MARKER_RESERVE_LINES);
 			return { content: [{ type: "text", text: `${bounded.text}${truncationMarker(bounded, "first", BATCH_RESULT_BYTES - BATCH_RESULT_MARKER_RESERVE_BYTES, BATCH_RESULT_LINES - BATCH_RESULT_MARKER_RESERVE_LINES)}` }], details: { batch, tasks } };
 		},
@@ -795,7 +797,7 @@ function registerBackgroundManagementTools(pi: ExtensionAPI, manager: Background
 	pi.registerTool({
 		name: "send_subagent_message",
 		label: "Send Subagent Message",
-		description: "Send additional context to a live background subagent while preserving its context. Use steer to redirect now or followUp to add work after its current turn.",
+		description: "Send additional context to a background subagent. steer requires an active child; followUp preserves active context or starts a fresh child from the bounded completed-task snapshot.",
 		parameters: Type.Object({
 			taskId: Type.String({ description: "Background task ID" }),
 			message: Type.String({ description: "Non-empty bounded message" }),
@@ -813,7 +815,7 @@ function registerBackgroundManagementTools(pi: ExtensionAPI, manager: Background
 	pi.registerTool({
 		name: "cancel_subagent",
 		label: "Cancel Subagent",
-		description: "Cancel an owned background subagent. Cancellation is idempotent.",
+		description: "Cancel an owned active background subagent. Cancellation is idempotent; completed children are already released.",
 		parameters: BackgroundTaskIdParams,
 		async execute(_toolCallId, params) {
 			try {
@@ -857,7 +859,7 @@ async function prepareBackgroundSpec(
 	cwd: string,
 	onReport: (report: SupervisorReport) => void,
 	onSettled: BackgroundTaskSpec["onSettled"],
-	operationSignal: AbortSignal,
+	operationSignal: AbortSignal | undefined,
 	sessionSignal: AbortSignal,
 ): Promise<PreparedBackgroundSpec> {
 	const supervisorBridge = await createSupervisorBridge(taskId, onReport, operationSignal, sessionSignal);
@@ -891,6 +893,14 @@ async function prepareBackgroundSpec(
 				await Promise.all([supervisorBridge.close(), forwardingBridge?.close()]);
 			},
 		};
+		const cleanupPrompt = async (): Promise<void> => {
+			if (promptPath) await fs.promises.unlink(promptPath).catch(() => undefined);
+			if (promptDir) await fs.promises.rmdir(promptDir).catch(() => undefined);
+		};
+		const cleanup = async (): Promise<void> => {
+			await Promise.all([supervisorBridge.close(), forwardingBridge?.close()]);
+			await cleanupPrompt();
+		};
 		const spec: BackgroundTaskSpec = {
 			id: taskId,
 			agent: agent.name,
@@ -905,19 +915,20 @@ async function prepareBackgroundSpec(
 			bridge,
 			onReport: () => undefined,
 			onSettled,
+			onStarted: cleanupPrompt,
+			onStartupFailure: cleanup,
 		};
-		return {
-			spec,
-			cleanupPrompt: async () => {
-				if (promptPath) await fs.promises.unlink(promptPath).catch(() => undefined);
-				if (promptDir) await fs.promises.rmdir(promptDir).catch(() => undefined);
-			},
-			cleanup: async () => {
-				await Promise.all([supervisorBridge.close(), forwardingBridge?.close()]);
-				if (promptPath) await fs.promises.unlink(promptPath).catch(() => undefined);
-				if (promptDir) await fs.promises.rmdir(promptDir).catch(() => undefined);
-			},
+		// A completed child is deliberately discarded. A follow-up gets a fresh
+		// bridge, prompt artifact, and RPC process, but keeps the public task ID.
+		spec.createFollowUp = async (replayPrompt: string): Promise<BackgroundTaskSpec> => {
+			// The original tool-call signal may be aborted after startup. Follow-up
+			// startup is governed by the session lifetime, not that old call.
+			const next = await prepareBackgroundSpec(ctx, taskId, agent, replayPrompt, modelTier, cwd, onReport, onSettled, undefined, sessionSignal);
+			next.spec.onStarted = next.cleanupPrompt;
+			next.spec.onStartupFailure = next.cleanup;
+			return next.spec;
 		};
+		return { spec, cleanupPrompt, cleanup };
 	} catch (error) {
 		await supervisorBridge.close().catch(() => undefined);
 		await forwardingBridge?.close().catch(() => undefined);
@@ -1069,11 +1080,12 @@ export default function (pi: ExtensionAPI) {
 							const summary = tasks.map((task) => `${task.id}:${task.agent}:${task.status}`).join(" ");
 							pi.sendMessage({ customType: "subagent-batch-complete", content: `[Background batch ${batch.id} ${batch.status}] ${batch.completed + batch.failed + batch.cancelled}/${batch.total} done. ${summary}\n\nRetrieve all outputs once with get_subagent_batch_result using batchId ${batch.id}.`, display: true, details: { batch, tasks } }, { deliverAs: "followUp", triggerTurn: true });
 						});
-						await Promise.all(prepared.map((item) => item.cleanupPrompt()));
 						updateBackgroundStatus(ctx);
 						return { content: [{ type: "text", text: `Background batch ${started.batch.id} started with ${started.tasks.length} tasks. The main agent can continue; completion is reported automatically. Use get_subagent_batch_result once the batch completes.` }], details: { mode: "parallel", status: "started", batchId: started.batch.id, tasks: started.tasks.map((task) => ({ id: task.id, agent: task.agent, task: task.task })) } };
 					} catch (error) {
-						await Promise.all(prepared.map(async (item) => backgroundTasks.get(item.spec.id!) ? item.cleanupPrompt() : item.cleanup()));
+						// startBatch rolls back any children it did publish; every prepared
+						// item therefore needs the full bridge and prompt cleanup path.
+						await Promise.all(prepared.map((item) => item.cleanup()));
 						return { content: [{ type: "text", text: `Could not start background batch: ${error instanceof Error ? error.message : String(error)}` }], details: makeDetails("parallel")([]), isError: true };
 					}
 				}
@@ -1090,7 +1102,6 @@ export default function (pi: ExtensionAPI) {
 						pi.sendMessage({ customType: "subagent-complete", content: `[Subagent ${completed.id} ${completed.status}]\n\n${completed.output || "(no output)"}`, display: true, details: completed }, { deliverAs: "followUp", triggerTurn: true });
 					}, operationSignal, sessionSignal);
 					const snapshot = await backgroundTasks.start(prepared.spec);
-					await prepared.cleanupPrompt();
 					updateBackgroundStatus(ctx);
 					return { content: [{ type: "text", text: `Background subagent ${snapshot.id} started. The main agent can continue; use get_subagent_status, send_subagent_message, or cancel_subagent.` }], details: { mode: "single", status: "started", taskId: snapshot.id, agent: snapshot.agent, model: snapshot.model } };
 				} catch (error) {

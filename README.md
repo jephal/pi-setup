@@ -291,11 +291,38 @@ send_subagent_message({ taskId: "task5678", message: "Also check the migration s
 cancel_subagent_batch({ batchId: "abcd1234" })
 ```
 
+The background limit is **eight active child executions**, not eight historical task records. Completed children are closed, their supervisor/MCP bridges are released, and only bounded terminal snapshots remain. Retained terminal tasks and batches have count and time limits, so they cannot grow indefinitely.
+
+A `followUp` sent to a running child preserves its live RPC context. A `followUp` sent after completion starts a fresh child with the same public task ID and a bounded replay prompt containing the original task, bounded prior output/diagnostics, and the new request. This avoids keeping completed child processes alive. `steer` is available only while the child is active.
+
+`get_subagent_result` and `get_subagent_batch_result` return detailed output once and then retain only compact continuation state. Repeated reads return the compact snapshot. Follow-ups are available only while that compact snapshot remains retained.
+
 Use `get_subagent_status` only for an intentional one-time inspection, and `get_subagent_result` for one task. Set `background: false` when the parent needs an inline result. Chains remain synchronous because each step depends on the previous result.
 
 Background tasks are scoped to the current Pi session and are stopped on reload, session replacement, or shutdown. Their intermediate output stays outside the parent context until the batch result is requested. A child can use the child-only `contact_supervisor` tool for an important progress update or decision request. The parent can answer by sending a follow-up message with the task ID.
 
 Background workers share the selected working directory, so do not run concurrent write-capable agents against the same files unless you have an explicit coordination strategy. Give each worker disjoint file ownership or use a worktree. Direct child-to-child team messaging is intentionally not part of this workflow.
+
+### Temporary storage on shared VMs
+
+The package registers `extensions/temp-storage.ts` before the other extensions. At
+session start it routes future Node temp files to a private directory:
+
+```text
+$XDG_RUNTIME_DIR/pi-setup
+```
+
+If `XDG_RUNTIME_DIR` is unavailable, it falls back to
+`~/.cache/pi-setup/tmp`. The directory is created with mode `0700`; no existing
+files are deleted or moved. Set `PI_SETUP_TEMP_DIR` to choose another absolute
+private directory, or set `PI_SETUP_DISABLE_PRIVATE_TEMP=1` to opt out.
+
+This isolates future `pi-bash-*`, Fovea, subagent, and MCP bridge artifacts from
+other users on a shared VM. The `pi_temp_storage_report` tool provides a
+read-only inventory of known artifacts, sessions, and Fovea cache; it never
+changes files. The upstream Pi bash output files still require a separate
+age/size janitor. Existing `/tmp` artifacts are intentionally left untouched
+until a separately confirmed cleanup.
 
 ### Herdr agent state integration
 
