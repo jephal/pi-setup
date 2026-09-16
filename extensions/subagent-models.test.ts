@@ -33,10 +33,26 @@ test("model resolution gives explicit tiers precedence over agent defaults and e
 	});
 });
 
-test("tier routes fall back to the active parent model when unavailable", () => {
-	assert.deepEqual(resolveAgentModel({ name: "scout", modelTier: "fast" }, { provider: "github-copilot", id: "gpt-5.6-luna" }, undefined, [
-		{ provider: "github-copilot", id: "gpt-5.6-luna" },
+test("logical tier routes prefer the parent provider over the legacy provider regardless of catalog order", () => {
+	assert.deepEqual(resolveAgentModel({ name: "worker", modelTier: "complex" }, { provider: "github-copilot", id: "gpt-5.6-luna" }, undefined, [
+		{ provider: "openai", id: "gpt-5.6-sol" },
+		{ provider: "github-copilot", id: "gpt-5.6-sol" },
 	]), {
+		model: "github-copilot/gpt-5.6-sol",
+		tier: "complex",
+		source: "tier",
+	});
+	assert.deepEqual(resolveAgentModel({ name: "worker", modelTier: "complex" }, { provider: "anthropic", id: "claude-sonnet-5" }, undefined, [
+		{ provider: "github-copilot", id: "gpt-5.6-sol" },
+	]), {
+		model: "github-copilot/gpt-5.6-sol",
+		tier: "complex",
+		source: "tier",
+	});
+});
+
+test("tier routes fall back to the active parent model when the logical target is unavailable", () => {
+	assert.deepEqual(resolveAgentModel({ name: "scout", modelTier: "fast" }, { provider: "github-copilot", id: "gpt-5.6-luna" }, undefined, []), {
 		model: "github-copilot/gpt-5.6-luna",
 		tier: "fast",
 		source: "parent",
@@ -51,7 +67,9 @@ test("tier routes fall back to the active parent model when unavailable", () => 
 });
 
 test("legacy exact models and parent models remain fallbacks", () => {
-	assert.deepEqual(resolveAgentModel({ name: "custom", model: "custom/provider-model" }, { provider: "openai", id: "gpt-5.6" }), {
+	assert.deepEqual(resolveAgentModel({ name: "custom", model: "custom/provider-model" }, { provider: "openai", id: "gpt-5.6" }, undefined, [
+		{ provider: "github-copilot", id: "gpt-5.6-sol" },
+	]), {
 		model: "custom/provider-model",
 		source: "agent",
 	});
