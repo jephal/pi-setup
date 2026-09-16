@@ -42,7 +42,15 @@ import {
 } from "./background.ts";
 import { createSupervisorBridge, isSupervisorChild, sendSupervisorReport, type SupervisorBridge, type SupervisorReport } from "./supervisor-bridge.ts";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
-import { MODEL_ROUTE_SUMMARY, MODEL_SELECTION_GUIDANCE, MODEL_TIERS, type ModelTier, resolveAgentModel } from "./models.ts";
+import {
+	MODEL_ROUTE_SUMMARY,
+	MODEL_SELECTION_GUIDANCE,
+	MODEL_TIERS,
+	type AvailableModel,
+	type ModelTier,
+	type ResolvedAgentModel,
+	resolveAgentModel,
+} from "./models.ts";
 import {
 	createMcpForwardingBridge,
 	getMcpForwardingProvider,
@@ -299,20 +307,32 @@ export function unsupportedChildToolNames(agent: AgentConfig): string[] {
 	return [...new Set((agent.tools ?? []).filter((tool) => !SAFE_CHILD_TOOLS.has(tool)))];
 }
 
+/** Uses the active catalog for both child CLI arguments and displayed metadata. */
+export function resolveChildInvocation(
+	agent: Pick<AgentConfig, "model"> & Partial<Pick<AgentConfig, "name" | "modelTier">>,
+	parentCtx: Pick<ExtensionContext, "model" | "thinkingLevel" | "modelRegistry">,
+	overrideTier?: ModelTier,
+): { resolved: ResolvedAgentModel; args: string[] } {
+	const args = ["--mode", "json", "-p", "--no-session"];
+	const availableModels: readonly AvailableModel[] | undefined = parentCtx.modelRegistry?.getAvailable().map((model) => ({
+		provider: model.provider,
+		id: model.id,
+	}));
+	const resolved = resolveAgentModel(agent, parentCtx.model ?? {}, overrideTier, availableModels);
+	if (resolved.model) {
+		args.push("--model", resolved.model);
+		if (resolved.source === "parent" && parentCtx.thinkingLevel) args.push("--thinking", parentCtx.thinkingLevel);
+	}
+	return { resolved, args };
+}
+
 /** Builds child CLI arguments while retaining legacy parent model and thinking defaults. */
 export function buildChildArgs(
 	agent: Pick<AgentConfig, "model"> & Partial<Pick<AgentConfig, "name" | "modelTier">>,
 	parentCtx: Pick<ExtensionContext, "model" | "thinkingLevel" | "modelRegistry">,
 	overrideTier?: ModelTier,
 ): string[] {
-	const args = ["--mode", "json", "-p", "--no-session"];
-	const availableModels = parentCtx.modelRegistry?.getAvailable().map((model) => ({ provider: model.provider, id: model.id }));
-	const resolved = resolveAgentModel(agent, parentCtx.model ?? {}, overrideTier, availableModels);
-	if (resolved.model) {
-		args.push("--model", resolved.model);
-		if (resolved.source === "parent" && parentCtx.thinkingLevel) args.push("--thinking", parentCtx.thinkingLevel);
-	}
-	return args;
+	return resolveChildInvocation(agent, parentCtx, overrideTier).args;
 }
 
 /** Bridge-provided remote names may be registered by the loader later, but must not be pre-registered. */
@@ -454,8 +474,7 @@ async function runSingleAgent(
 		};
 	}
 
-	const resolvedModel = resolveAgentModel(agent, parentCtx.model ?? {}, modelTier);
-	const args = buildChildArgs(agent, parentCtx, modelTier);
+	const { resolved: resolvedModel, args } = resolveChildInvocation(agent, parentCtx, modelTier);
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
@@ -663,7 +682,7 @@ const BUNDLED_AGENT_GUIDANCE = [
 	"datadog-investigator — read-only evidence-first Datadog investigation (default fast: gpt-5.6-luna)",
 ].join("; ");
 const AGENT_NAME_DESCRIPTION = `Exact bundled agent names: ${BUNDLED_AGENT_GUIDANCE}. Custom user/project agents may also be available; they are discovered at runtime.`;
-const MODEL_TIER_DESCRIPTION = `Optional model tier override: fast for clear low-risk work, medium by default, complex only for ambiguity, security/concurrency risk, difficult debugging, high-cost failure, or a failed medium attempt. When unsure, choose medium. Routes: ${MODEL_ROUTE_SUMMARY}.`;
+const MODEL_TIER_DESCRIPTION = `Optional model tier override. Use fast for clear low-risk work and medium by default. Treat complex as a rare exception; use it only for genuinely ambiguous architecture, security or concurrency risk, difficult debugging, high-cost failure, or a failed medium attempt. When unsure, choose medium, and upgrade only the affected step. Routes: ${MODEL_ROUTE_SUMMARY}.`;
 const ModelTierSchema = StringEnum(MODEL_TIERS, { description: MODEL_TIER_DESCRIPTION });
 
 const TaskItem = Type.Object({
@@ -976,8 +995,8 @@ export default function (pi: ExtensionAPI) {
 			"For substantial implementation, chain a worker, reviewer, then worker to apply review feedback.",
 			"Single-agent calls run in the background by default; set background: false only when the caller needs an inline result before continuing. Set background: true with parallel tasks for independent focused work. Chains remain synchronous because they depend on handoffs.",
 			"Background completion is event-driven: do not poll get_subagent_status or sleep. Wait for the automatic batch completion message, then call get_subagent_batch_result once. Use send_subagent_message to add context to a running child; use the child-only contact_supervisor channel for important child-to-parent reports or decisions.",
-			"Choose fast for reconnaissance and clear low-risk work; use medium by default; choose complex only for ambiguity, security or concurrency risk, difficult debugging, high-cost failure, or a failed medium attempt.",
-			"In chains and parallel batches, set modelTier only on the step that needs escalation; do not make the whole workflow complex because one task is risky.",
+			"Use fast for reconnaissance and clear low-risk work; use medium by default. Treat complex as a rare exception for genuinely ambiguous or high-consequence work, difficult debugging, or a failed medium attempt.",
+			"Do not choose complex merely because a task is long, multi-file, or important. In chains and parallel batches, set modelTier only on the affected step; do not make the whole workflow complex because one task is risky.",
 			MODEL_SELECTION_GUIDANCE,
 			"Review and validate delegated changes; prefer git mv for one-to-one moves and ast-grep for mechanical refactors.",
 		],

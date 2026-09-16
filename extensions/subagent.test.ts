@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Message } from "@earendil-works/pi-ai";
-import registerSubagent, { backgroundChildProcessToolNames, boundHeadText, boundText, buildChildArgs, childProcessToolNames, childToolNames, compactResult, getFinalOutput, isFailedResult, sanitizeText, unsupportedChildToolNames } from "./subagent/index.ts";
+import registerSubagent, { backgroundChildProcessToolNames, boundHeadText, boundText, buildChildArgs, childProcessToolNames, childToolNames, compactResult, getFinalOutput, isFailedResult, resolveChildInvocation, sanitizeText, unsupportedChildToolNames } from "./subagent/index.ts";
 
 test("subagent tool contract lists the bundled agent names", () => {
 	const registered: any[] = [];
@@ -26,7 +26,7 @@ test("subagent tool contract lists the bundled agent names", () => {
 	}
 	assert.match(definition.description, /do not poll status or sleep/);
 	assert.match(definition.description, /background: true with parallel tasks/);
-	assert.match(definition.parameters.properties.modelTier.description, /complex only/);
+	assert.match(definition.parameters.properties.modelTier.description, /complex as a rare exception/);
 });
 
 test("subagent helpers concatenate final assistant text and sanitize bounded output", () => {
@@ -71,6 +71,46 @@ test("subagent child arguments preserve parent high-thinking defaults unless the
 	assert.deepEqual(buildChildArgs({ model: "openai/gpt-5.6-terra" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-5.6-terra"]);
 	assert.deepEqual(buildChildArgs({ name: "planner", model: "claude-opus-5", modelTier: "medium" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "anthropic/claude-sonnet-5"]);
 	assert.deepEqual(buildChildArgs({ name: "worker", model: "gpt-5.6-terra", modelTier: "medium" }, parent, "complex"), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-5.6-sol"]);
+});
+
+test("synchronous metadata and child CLI use the same provider-aware model resolution", () => {
+	const parent = {
+		model: { provider: "github-copilot", id: "gpt-5.6-luna" },
+		modelRegistry: {
+			getAvailable: () => [{ provider: "github-copilot", id: "gpt-5.6-sol" }],
+		},
+	} as any;
+	const invocation = resolveChildInvocation({ name: "worker", model: undefined, modelTier: "complex" }, parent);
+
+	assert.equal(invocation.resolved.model, "github-copilot/gpt-5.6-sol");
+	assert.equal(invocation.resolved.tier, "complex");
+	assert.deepEqual(invocation.args, ["--mode", "json", "-p", "--no-session", "--model", invocation.resolved.model]);
+	assert.deepEqual(buildChildArgs({ name: "worker", model: undefined, modelTier: "complex" }, parent), invocation.args);
+});
+
+test("synchronous tier fallback invokes the parent model with inherited thinking", () => {
+	const parent = {
+		model: { provider: "github-copilot", id: "gpt-5.6-luna" },
+		thinkingLevel: "high",
+		modelRegistry: { getAvailable: () => [] },
+	} as any;
+	const invocation = resolveChildInvocation({ name: "worker", model: "custom/provider-model", modelTier: "complex" }, parent);
+
+	assert.deepEqual(invocation.resolved, {
+		model: "github-copilot/gpt-5.6-luna",
+		tier: "complex",
+		source: "parent",
+	});
+	assert.deepEqual(invocation.args, [
+		"--mode",
+		"json",
+		"-p",
+		"--no-session",
+		"--model",
+		"github-copilot/gpt-5.6-luna",
+		"--thinking",
+		"high",
+	]);
 });
 
 test("subagent streaming details bound raw stderr and retain long single-line tasks", () => {

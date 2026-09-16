@@ -228,6 +228,13 @@ medium   → claude-sonnet-5 for planning/review, gpt-5.6-terra for implementati
 complex  → claude-opus-5 for planning/review, gpt-5.6-sol for implementation
 ```
 
+Tier routes use these model IDs logically rather than requiring the documented
+provider. When the active catalog exposes a target ID through the parent
+provider, subagents use that provider; otherwise they use another available
+provider for the ID. If the target is unavailable, they retain the active parent
+model. When both `modelTier` and `model` are present, `modelTier` takes
+precedence. An explicit agent `model:` is used when no tier is set.
+
 Default presets:
 
 ```text
@@ -240,10 +247,11 @@ datadog-investigator  → fast / gpt-5.6-luna
 
 Choose `fast` for reconnaissance, simple searches, short summaries, and clear
 low-risk tasks. Choose `medium` by default for ordinary planning, review, tests,
-bug fixes, and bounded implementation. Choose `complex` only for ambiguous
-architecture, security or concurrency risk, difficult debugging, high-cost
-failure, or a failed medium attempt. When unsure, choose medium; task length
-alone is not a reason to choose complex.
+bug fixes, and bounded implementation. Treat `complex` as a rare exception, not
+a default: use it only for genuinely ambiguous architecture, security or
+concurrency risk, difficult debugging, high-cost failure, or a failed medium
+attempt. When unsure, choose medium. Do not choose complex merely because a task
+is long, multi-file, or important; upgrade only the affected step.
 
 For example, a normal mixed chain can keep the scout fast while escalating only
 the risky implementation step:
