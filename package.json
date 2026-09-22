@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "callscript": "0.1.5",
     "pi-fovea": "git+https://github.com/jephal/pi-fovea.git#v0.18.5-agent-safe.2"
   },
   "peerDependencies": {
@@ -49,6 +50,8 @@
       "extensions/plan-mode.ts",
       "extensions/scheduled-tasks.ts",
       "extensions/notes.ts",
+      "extensions/repo-search.ts",
+      "extensions/pi-program.ts",
       "extensions/approval-modes.ts",
       "extensions/memory.ts",
       "node_modules/pi-fovea/src/index.ts",

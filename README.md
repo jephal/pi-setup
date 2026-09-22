@@ -26,6 +26,15 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Auto mode
   - Review mode
   - Shared approval HITL UI
+- Repository search
+  - Gives Pi a native `repo_search` router for file-name and text searches
+  - Auto routes glob-like queries to `find` and other queries to `grep`; explicit modes override
+  - Shares the same router with the `repo.search` CallScript capability
+- Read-only Pi programs
+  - Gives Pi one `pi_program` tool backed by CallScript's neutral core API
+  - Mounts `repo.read`, `repo.find`, `repo.grep`, `repo.ls`, and `repo.search`, using the execution cwd as a strict repository boundary
+  - Returns compact text and never mounts writes, edit, bash, shell, MCP, notes mutation, memory mutation, or subagents
+  - The nested calls bypass Pi's `tool_call` event, so the intrinsic read-only mount boundary is authoritative
 - Herdr shell integration
   - Gives Pi a `herdr_shell` tool for long-running commands and local servers
   - Creates one right-side pane in the current Herdr tab, never a new tab or workspace
@@ -137,6 +146,26 @@ only `mcp_read` and resource-read permissions (not `mcp_write`), and keep
 `DD_MCP_ENDPOINT_PATH` limited to the configured `core`, `error-tracking`, and `rum`
 toolsets. The extension does not infer permissions from tool names or apply a `write`
 name heuristic; unexpected endpoint toolsets are rejected.
+
+## Repository search and read-only Pi programs
+
+The package registers `repo_search`, a native repository search router, and `pi_program`, a bounded CallScript program runner for repository inspection. `repo_search` uses Pi's native `find` and `grep` implementations: glob-like queries route to file names, and other queries route to file contents. Set `mode` to `files` or `text` to override auto routing. The compact shared schema accepts `query`, `mode`, `path`, `glob`, `ignoreCase`, `literal`, `context`, and `limit` as relevant to the selected search.
+
+CallScript compiles the submitted JavaScript into a validated plan; it does not execute model-authored JavaScript. The neutral registry contains these stable capabilities:
+
+- `repo.read`
+- `repo.find`
+- `repo.grep`
+- `repo.ls`
+- `repo.search`
+
+Each invocation builds the registry from Pi's built-in read/find/grep/ls tool-definition factories plus the shared search router with the current execution cwd. Nested arguments are validated against those TypeBox schemas before direct dispatch. Results are reduced to compact text, and image/UI-only blocks are omitted. The adapter checks the outer abort signal before every nested call and during Pi's active filesystem operations.
+
+Paths are resolved within the execution cwd. Absolute paths are allowed only when they remain inside that directory; paths using `~`, `..`, or `file://`, and symlinks, are rejected when resolution would escape it. This keeps the pilot repository-scoped rather than inheriting Pi's unrestricted path behavior.
+
+The pilot uses conservative CallScript bounds: 20 steps, 25 calls per fan-out, 50 worst-case calls per script, five concurrent calls, 64 KiB per nested result, and a 96 KiB final result. Nested inputs also cap `read.limit` at 2,000 lines, search limits at 2,000 results, and grep context at 20 lines. `find` and `grep` require an existing `fd` and `rg` executable. The adapter never invokes Pi's downloader, so missing binaries produce a compact error and do not write a tool cache or access the network.
+
+CallScript dispatches nested calls directly, so they do not emit Pi's outer `tool_call` event. Review and Plan approval modes allow both `repo_search` and the `pi_program` host tool, while the intrinsic mount boundary remains authoritative: writes, edit, bash, shell, MCP, notes mutation, memory mutation, and subagents are not mounted and are rejected before execution.
 
 ## Local notes integration
 

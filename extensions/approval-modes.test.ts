@@ -11,15 +11,18 @@ test("Plan mode bash safety rejects mutating Git commands and shell composition"
 });
 
 test("Plan mode allows context tools while Review mode keeps the conservative set", () => {
-	for (const tool of ["notes_list", "notes_write", "memory", "herdr_shell", "fovea_focus", "datadog_search_tools", "scheduled_task_list"]) {
+	for (const tool of ["notes_list", "notes_write", "memory", "herdr_shell", "fovea_focus", "datadog_search_tools", "scheduled_task_list", "pi_program", "repo_search"]) {
 		assert.equal(PLAN_TOOLS.has(tool), true, tool);
 	}
+	assert.equal(REVIEW_TOOLS.has("pi_program"), true);
+	assert.equal(REVIEW_TOOLS.has("repo_search"), true);
 	assert.equal(REVIEW_TOOLS.has("notes_list"), false);
 	assert.equal(isPlanModeToolAllowed("datadog_logs"), true);
+	assert.equal(isPlanModeToolAllowed("pi_program"), true);
 	assert.equal(isPlanModeToolAllowed("write"), false);
-	const available = ["read", "plan", "notes_list", "memory", "fovea_focus", "datadog_logs"];
-	assert.deepEqual(readOnlyToolNames("review", available), ["read", "plan"]);
-	assert.deepEqual(readOnlyToolNames("plan", available), ["read", "plan", "notes_list", "memory", "fovea_focus"]);
+	const available = ["read", "plan", "pi_program", "repo_search", "notes_list", "memory", "fovea_focus", "datadog_logs"];
+	assert.deepEqual(readOnlyToolNames("review", available), ["read", "plan", "pi_program", "repo_search"]);
+	assert.deepEqual(readOnlyToolNames("plan", available), ["read", "plan", "pi_program", "repo_search", "notes_list", "memory", "fovea_focus"]);
 });
 
 test("leaving read-only mode preserves dynamically activated tools", () => {

@@ -1,5 +1,5 @@
 /** The original conservative tool set used by Review mode. */
-export const REVIEW_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "ask_questions", "plan"]);
+export const REVIEW_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "ask_questions", "plan", "pi_program", "repo_search"]);
 
 // Read-only shell commands allowed by Plan and Review modes.
 const SAFE_BASH = [
