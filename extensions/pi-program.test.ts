@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
 import piProgramExtension, { boundText, compactToolResult, createPiProgramTool, createPiProgramTools, executableExists, PI_PROGRAM_CAPABILITIES } from "./pi-program.ts";
+import { MemoryStore } from "../src/memory/db.ts";
 
 function context(cwd: string) {
 	return { cwd, signal: undefined, model: undefined } as any;
@@ -18,10 +19,14 @@ test("registers only the pi_program host tool", () => {
 	assert.deepEqual(definitions.map((definition) => definition.name), ["pi_program"]);
 });
 
-test("mounts the four core capabilities plus the shared search router", () => {
+test("mounts the approved read-only capability registry and no direct-only tools", () => {
 	const tools = createPiProgramTools(process.cwd(), undefined, context(process.cwd()));
 	assert.deepEqual(tools.map((entry) => entry.name), [...PI_PROGRAM_CAPABILITIES]);
-	assert.equal(tools.some((entry) => /bash|shell|write|edit|mcp|notes|memory|subagent/i.test(entry.name)), false);
+	assert.ok(tools.some((entry) => entry.name === "fovea.focus"));
+	assert.ok(tools.some((entry) => entry.name === "notes.search"));
+	assert.ok(tools.some((entry) => entry.name === "memory.list"));
+	assert.ok(tools.some((entry) => entry.name === "datadog.call"));
+	assert.equal(tools.some((entry) => /bash|shell|write|edit|mcp|subagent/i.test(entry.name)), false);
 });
 
 test("binds nested repository reads to the execution cwd", async () => {
@@ -65,6 +70,8 @@ test("uses CallScript's documented schema and a compact capability card", () => 
 	assert.equal(Value.Check(schema, { script: "ok" }), true);
 	assert.equal(Value.Check(schema, { script: "ok", extra: true }), false);
 	assert.match(definition.description, /repo\.read/);
+	assert.match(definition.description, /fovea\./);
+	assert.match(definition.description, /datadog\.(search|describe|call)/);
 	assert.match(definition.description, /25 calls per fan-out/);
 	assert.match(definition.description, /50 calls total/);
 });
@@ -98,6 +105,35 @@ test("runs read, find, grep, and ls programs", async () => {
 		assert.match(result.content[0].text, /marker\.txt:1: needle here/);
 		assert.match(result.content[0].text, /nested\//);
 	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runs Notes and Memory context capabilities through CallScript", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-context-"));
+	const previousNotes = process.env.NOTES_PATH;
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.NOTES_PATH = cwd;
+	process.env.PI_CODING_AGENT_DIR = cwd;
+	const store = new MemoryStore(join(cwd, "memory", "memory.sqlite"));
+	store.save({ content: "CallScript context bridge memory", scope: "user", category: "fact", tags: [], importance: 0.8 });
+	store.close();
+	try {
+		await writeFile(join(cwd, "context.md"), "Context bridge note\\n", "utf8");
+		const result = await createPiProgramTool().execute(
+			"program",
+			{ script: 'const note = await notes.read({ path: "context.md" }); const memories = await memory.search({ query: "context bridge" }); return note + memories;' },
+			undefined,
+			undefined,
+			context(cwd),
+		);
+		assert.match(result.content[0].text, /Context bridge note/);
+		assert.match(result.content[0].text, /CallScript context bridge memory/);
+	} finally {
+		if (previousNotes === undefined) delete process.env.NOTES_PATH;
+		else process.env.NOTES_PATH = previousNotes;
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		await rm(cwd, { recursive: true, force: true });
 	}
 });

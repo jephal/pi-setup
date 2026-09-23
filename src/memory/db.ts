@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { isMemoryStale, rankMemories } from "./ranking.ts";
@@ -85,7 +85,13 @@ function validateContent(value: unknown): string {
 export class MemoryStore {
 	private readonly db: DatabaseSync;
 
-	constructor(databasePath: string) {
+	constructor(databasePath: string, options: { readOnly?: boolean } = {}) {
+		if (options.readOnly) {
+			// Read paths must never create the parent directory, database, WAL, or
+			// schema. DatabaseSync's readOnly flag also prevents accidental writes.
+			this.db = new DatabaseSync(databasePath, { readOnly: true, timeout: 2500 });
+			return;
+		}
 		mkdirSync(dirname(databasePath), { recursive: true });
 		this.db = new DatabaseSync(databasePath);
 		this.db.exec("PRAGMA busy_timeout = 2500; PRAGMA journal_mode = WAL;");
@@ -114,6 +120,12 @@ export class MemoryStore {
 		} catch {
 			// Existing databases already have the column.
 		}
+	}
+
+	/** Open an existing database without creating directories or schema. */
+	static openReadOnly(databasePath: string): MemoryStore | undefined {
+		if (!existsSync(databasePath)) return undefined;
+		return new MemoryStore(databasePath, { readOnly: true });
 	}
 
 	private transaction<T>(operation: () => T): T {

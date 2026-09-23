@@ -4,6 +4,7 @@ import type { Tool as McpTool } from '@modelcontextprotocol/sdk/types.js';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from '@earendil-works/pi-coding-agent';
 import { Type, type TSchema } from 'typebox';
+import { Value } from 'typebox/value';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -20,6 +21,14 @@ const DEFAULT_SITE = 'us3';
 const DEFAULT_CLI_PATH = join(homedir(), '.local', 'bin', 'datadog_mcp_cli');
 const DEFAULT_ENDPOINT_PATH = 'v1/mcp?toolsets=core,error-tracking,rum';
 const READ_ONLY_TOOLSETS = new Set(['core', 'error-tracking', 'rum']);
+/**
+ * Positive manifest for the stable Datadog capability names currently used by
+ * this bridge. Unknown tools must prove read-only status through MCP metadata;
+ * a `datadog_` name alone is never an authorization boundary.
+ */
+export const DATADOG_READ_ONLY_TOOL_MANIFEST = new Set([
+  'logs', 'error_tracking', 'rum', 'metrics', 'traces', 'events',
+]);
 const TOOL_PREFIX = 'datadog_';
 const SEARCH_TOOL_NAME = 'datadog_search_tools';
 
@@ -43,7 +52,14 @@ let sessionShuttingDown = false;
 let activePi: ExtensionAPI | undefined;
 const registeredToolNames = new WeakMap<object, Set<string>>();
 const remoteTools = new Map<string, McpTool>();
+const approvedDatadogToolNames = new Set<string>();
 const forwardedTools = new Map<string, ForwardedToolDefinition>();
+
+export interface DatadogCapabilityProvider {
+  search(query: string, limit: number, ctx: ExtensionContext, signal?: AbortSignal): Promise<unknown>;
+  describe(name: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<unknown>;
+  call(name: string, arguments_: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal): Promise<unknown>;
+}
 
 /** Resolves the one effective Datadog configuration used by connection and errors. */
 export function resolveDatadogConfig(env: NodeJS.ProcessEnv = process.env): DatadogConfig {
@@ -114,6 +130,18 @@ function safeEndpointPath(endpointPath: string): string {
 
 function staleLifecycleError(): Error {
   return new Error('Datadog MCP connection was superseded or shut down.');
+}
+
+export function isDatadogReadOnlyTool(remoteTool: Pick<McpTool, 'name' | 'annotations'>): boolean {
+  if (DATADOG_READ_ONLY_TOOL_MANIFEST.has(remoteTool.name)) return true;
+  return remoteTool.annotations?.readOnlyHint === true && remoteTool.annotations.destructiveHint !== true;
+}
+
+/** Shared direct-tool policy; the prefix only identifies the remote name. */
+export function isDatadogReadOnlyToolName(piToolName: string): boolean {
+  return piToolName.startsWith(TOOL_PREFIX)
+    && (approvedDatadogToolNames.has(piToolName)
+      || isDatadogReadOnlyTool({ name: piToolName.slice(TOOL_PREFIX.length) }));
 }
 
 async function waitForSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -262,6 +290,7 @@ function resetDiscoveryState(pi: ExtensionAPI | undefined = activePi): void {
   discoveryPromiseClient = undefined;
   discoveryClient = undefined;
   remoteTools.clear();
+  approvedDatadogToolNames.clear();
   forwardedTools.clear();
 }
 
@@ -428,12 +457,16 @@ async function discoverToolsOnce(
   if (!isCurrentLifecycle(generation, mcpClient) || signal.aborted) throw staleLifecycleError();
   const previousRemoteNames = new Set(remoteTools.keys());
   const activeBeforeDiscovery = new Set(pi.getActiveTools().filter((name) => !previousRemoteNames.has(name)));
+  remoteTools.clear();
   if (previousRemoteNames.size > 0) pi.setActiveTools([...activeBeforeDiscovery]);
 
-  for (const remoteTool of result.tools) {
+  const readOnlyTools = result.tools.filter(isDatadogReadOnlyTool);
+  approvedDatadogToolNames.clear();
+  for (const remoteTool of readOnlyTools) {
     if (!isCurrentLifecycle(generation, mcpClient) || signal.aborted) throw staleLifecycleError();
     const piToolName = toPiToolName(remoteTool.name);
     remoteTools.set(piToolName, remoteTool);
+    approvedDatadogToolNames.add(piToolName);
     registerTool(remoteTool, pi);
   }
 
@@ -445,7 +478,7 @@ async function discoverToolsOnce(
   toolsDiscovered = true;
   discoveryClient = mcpClient;
 
-  return result.tools.length;
+  return readOnlyTools.length;
 }
 
 /**
@@ -505,6 +538,7 @@ function findToolMatches(query: string, limit: number): string[] {
  * @param pi - The pi extension API.
  */
 function registerTool(remoteTool: McpTool, pi: ExtensionAPI): void {
+  if (!isDatadogReadOnlyTool(remoteTool)) return;
   const piToolName = toPiToolName(remoteTool.name);
   // Pi does not expose tool removal. Register each name once per Pi API and
   // resolve the current remote definition at execution time so reconnects
@@ -520,8 +554,8 @@ function registerTool(remoteTool: McpTool, pi: ExtensionAPI): void {
     description: remoteTool.description ?? `Call the Datadog MCP tool ${remoteTool.name}.`,
     parameters,
     executionMode: 'sequential',
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
-      return callDatadogToolByName(piToolName, params, signal);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      return callDatadogToolByName(piToolName, params, signal, ctx);
     },
   });
   registeredNames.add(piToolName);
@@ -553,24 +587,116 @@ function toPiToolName(remoteName: string): string {
  * @param pi - The parent extension API used to activate matching tools.
  * @returns The forwarding provider.
  */
+/** Return the parent-owned dynamic bridge used by read-only host adapters. */
+export function getDatadogCapabilityProvider(): DatadogCapabilityProvider {
+  return {
+    search: async (query, limit, ctx, signal) => {
+      if (isMcpForwardingChild()) {
+        return requestForwardedMcp('tools/search', { query, limit }, signal);
+      }
+      const pi = activePi;
+      if (!pi) throw new Error('Datadog MCP is not initialized in the parent process.');
+      return searchCurrentDatadogTools(query, limit, ctx, signal);
+    },
+    describe: async (name, ctx, signal) => {
+      const tools = isMcpForwardingChild()
+        ? parseForwardedToolList(await requestForwardedMcp('tools/list', {}, signal))
+        : await listCurrentDatadogTools(ctx, signal);
+      const tool = tools.find((entry) => entry.name === name);
+      if (!tool) throw new Error(`Datadog tool is unavailable in the current lifecycle: ${name}`);
+      return { name: tool.name, description: tool.description, parameters: tool.parameters };
+    },
+    call: async (name, arguments_, ctx, signal) => {
+      if (isMcpForwardingChild()) {
+        return requestForwardedMcp('tools/call', { name, arguments: arguments_ }, signal);
+      }
+      return callRevalidatedDatadogCapability(name, arguments_, ctx, signal);
+    },
+  };
+}
+
+async function listCurrentDatadogTools(ctx: ExtensionContext, signal?: AbortSignal): Promise<ForwardedToolDefinition[]> {
+  const connecting = connect(ctx);
+  const activeClient = signal ? await waitForSignal(connecting, signal) : await connecting;
+  const generation = lifecycleGeneration;
+  const callSignal = signal
+    ? AbortSignal.any([signal, lifecycleAbortController.signal])
+    : lifecycleAbortController.signal;
+  // Dynamic metadata is refreshed rather than trusted from the lazy Pi tool
+  // registry. This catches reconnects, remote removals, and schema changes.
+  const listed = await activeClient.listTools(undefined, { signal: callSignal });
+  if (!isCurrentLifecycle(generation, activeClient) || callSignal.aborted) throw staleLifecycleError();
+  const readOnlyTools = listed.tools.filter(isDatadogReadOnlyTool);
+  remoteTools.clear();
+  approvedDatadogToolNames.clear();
+  for (const remoteTool of readOnlyTools) {
+    const name = toPiToolName(remoteTool.name);
+    remoteTools.set(name, remoteTool);
+    approvedDatadogToolNames.add(name);
+  }
+  return readOnlyTools.map((remoteTool) => ({
+    name: toPiToolName(remoteTool.name),
+    description: remoteTool.description ?? `Call the Datadog MCP tool ${remoteTool.name}.`,
+    parameters: remoteTool.inputSchema as Record<string, unknown>,
+  }));
+}
+
+async function searchCurrentDatadogTools(
+  query: string,
+  limit: number,
+  ctx: ExtensionContext,
+  signal?: AbortSignal,
+): Promise<{ matches: ForwardedToolDefinition[]; addedTools: string[] }> {
+  await listCurrentDatadogTools(ctx, signal);
+  if (signal?.aborted) throw staleLifecycleError();
+  return { matches: findToolMatches(query, limit).map((name) => toForwardedTool(name)), addedTools: [] };
+}
+
+async function callRevalidatedDatadogCapability(
+  name: string,
+  arguments_: Record<string, unknown>,
+  ctx: ExtensionContext,
+  signal?: AbortSignal,
+): Promise<ForwardedToolResult> {
+  const connecting = connect(ctx);
+  const activeClient = signal ? await waitForSignal(connecting, signal) : await connecting;
+  const generation = lifecycleGeneration;
+  const callSignal = signal
+    ? AbortSignal.any([signal, lifecycleAbortController.signal])
+    : lifecycleAbortController.signal;
+  // Refresh the remote catalog for every dynamic call. The current client,
+  // exact remote name, and current schema are all revalidated before dispatch.
+  const listed = await activeClient.listTools(undefined, { signal: callSignal });
+  if (!isCurrentLifecycle(generation, activeClient) || callSignal.aborted) throw staleLifecycleError();
+  const remoteTool = listed.tools.find((candidate) => toPiToolName(candidate.name) === name);
+  if (!remoteTool || !isDatadogReadOnlyTool(remoteTool)) {
+    throw new Error(`Datadog tool is not an approved read-only capability: ${name}`);
+  }
+  if (!Value.Check(remoteTool.inputSchema as any, arguments_)) {
+    const issue = [...Value.Errors(remoteTool.inputSchema as any, arguments_)][0];
+    throw new Error(`Invalid arguments for ${name}: ${issue?.message ?? 'schema validation failed'}`);
+  }
+  remoteTools.set(name, remoteTool);
+  approvedDatadogToolNames.add(name);
+  return callDatadogTool(activeClient, remoteTool, arguments_, signal, generation);
+}
+
 function createForwardingProvider(pi: ExtensionAPI): McpForwardingProvider {
   return {
     listTools: async (ctx: ExtensionContext, signal?: AbortSignal): Promise<ForwardedToolDefinition[]> => {
       if (isMcpForwardingChild()) {
         return parseForwardedToolList(await requestForwardedMcp('tools/list', {}, signal));
       }
-      await ensureDatadogToolsDiscovered(pi, ctx, signal);
-      if (signal?.aborted) throw staleLifecycleError();
-      return [...remoteTools.keys()].map((name) => toForwardedTool(name));
+      return listCurrentDatadogTools(ctx, signal);
     },
     searchTools: (query: string, limit: number, ctx: ExtensionContext, signal?: AbortSignal) =>
       isMcpForwardingChild()
         ? requestForwardedMcp('tools/search', { query, limit }, signal).then(parseForwardedSearchResponse)
-        : searchForwardedDatadogTools(query, limit, pi, ctx, signal),
+        : searchCurrentDatadogTools(query, limit, ctx, signal),
     callTool: (name: string, arguments_: Record<string, unknown>, signal: AbortSignal | undefined, ctx: ExtensionContext) =>
       isMcpForwardingChild()
         ? requestForwardedMcp('tools/call', { name, arguments: arguments_ }, signal) as Promise<ForwardedToolResult>
-        : callForwardedDatadogTool(name, arguments_, ctx, signal),
+        : callRevalidatedDatadogCapability(name, arguments_, ctx, signal),
   };
 }
 
@@ -805,13 +931,13 @@ async function callDatadogToolByName(
   piToolName: string,
   arguments_: Record<string, unknown>,
   signal: AbortSignal | undefined,
+  ctx: ExtensionContext,
 ): Promise<ForwardedToolResult> {
-  const remoteTool = remoteTools.get(piToolName);
-  if (!remoteTool) throw new Error(`Datadog tool is unavailable in the current discovery: ${piToolName}`);
-  const activeClient = client;
-  if (!activeClient) throw new Error('Datadog MCP is not connected. Run /datadog-connect first.');
-  const generation = lifecycleGeneration;
-  return callDatadogTool(activeClient, remoteTool, arguments_, signal, generation);
+  if (!isDatadogReadOnlyToolName(piToolName)) {
+    throw new Error(`Datadog tool is not an approved read-only capability: ${piToolName}`);
+  }
+  if (!client) throw new Error('Datadog MCP is not connected. Run /datadog-connect first.');
+  return callRevalidatedDatadogCapability(piToolName, arguments_, ctx, signal);
 }
 
 /**
@@ -837,7 +963,14 @@ async function callDatadogTool(
     { signal: callSignal },
   );
   if (!isCurrentLifecycle(generation, activeClient)) throw staleLifecycleError();
-  const output = JSON.stringify(result, null, 2) ?? String(result);
+  // Normalize MCP content blocks before serialization. Otherwise an image or
+  // binary block would become visible as a JSON payload in the text bridge.
+  const safeResult = Array.isArray(result.content)
+    ? { ...result, content: result.content
+        .filter((block): block is { type: 'text'; text: string } => block?.type === 'text' && typeof block.text === 'string')
+        .map((block) => ({ type: 'text', text: block.text })) }
+    : result;
+  const output = JSON.stringify(safeResult, null, 2) ?? String(safeResult);
   const truncated = truncateHead(output, {
     maxBytes: DEFAULT_MAX_BYTES,
     maxLines: DEFAULT_MAX_LINES,

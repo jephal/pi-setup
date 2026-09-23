@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   discoverTools,
+  getDatadogCapabilityProvider,
   formatConnectionError,
   keepDiscoveredToolsInactive,
   resolveDatadogConfig,
@@ -109,7 +110,7 @@ test("Datadog session start replaces a pending lifecycle before the next client 
     async close() { closeCalls++; release?.(); },
   };
   const newClient = {
-    async listTools() { return { tools: [{ name: "new_tool", description: "new", inputSchema: { type: "object" } }] }; },
+    async listTools() { return { tools: [{ name: "logs", description: "new", inputSchema: { type: "object" } }] }; },
     async close() { /* test seam */ },
   };
   const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void> | void>();
@@ -134,7 +135,7 @@ test("Datadog session start replaces a pending lifecycle before the next client 
 
   setDatadogClientForTesting(newClient as any);
   assert.equal(await discoverTools(newClient as any, pi as any), 1);
-  assert.equal(definitions.filter((definition) => definition.name === "datadog_new_tool").length, 1);
+  assert.equal(definitions.filter((definition) => definition.name === "datadog_logs").length, 1);
   setDatadogClientForTesting(undefined);
 });
 
@@ -214,6 +215,55 @@ test("Datadog schema refresh reuses one Pi tool and resolves the current client 
     definitions.find((definition) => definition.name === "datadog_logs").execute("call", {}, new AbortController().signal, undefined, {}),
     /unavailable|connected/i,
   );
+});
+
+test("dynamic Datadog capabilities refresh metadata and validate the current remote schema", async () => {
+  let listings = 0;
+  let calls = 0;
+  const client = {
+    async listTools() {
+      listings++;
+      return { tools: [{ name: "logs", description: "current logs", inputSchema: {
+        type: "object", properties: { fresh: { type: "boolean" } }, required: ["fresh"], additionalProperties: false,
+      } }] };
+    },
+    async callTool() { calls++; return { content: [{ type: "text", text: "current" }] }; },
+  };
+  setDatadogClientForTesting(client as any);
+  const provider = getDatadogCapabilityProvider();
+  const ctx = { cwd: process.cwd() } as any;
+  assert.equal((await provider.describe("datadog_logs", ctx) as any).parameters.required[0], "fresh");
+  await assert.rejects(provider.call("datadog_logs", { old: "schema" }, ctx), /Invalid arguments/);
+  const result = await provider.call("datadog_logs", { fresh: true }, ctx) as any;
+  assert.match(result.content[0].text, /current/);
+  assert.equal(calls, 1);
+  assert.ok(listings >= 3);
+  setDatadogClientForTesting(undefined);
+});
+
+test("Datadog rejects mutation-capable remote tools and omits binary output", async () => {
+  let calls = 0;
+  const client = {
+    async listTools() {
+      return { tools: [
+        { name: "create_monitor", description: "mutates monitors", inputSchema: { type: "object" } },
+        { name: "logs", description: "read logs", inputSchema: { type: "object" } },
+      ] };
+    },
+    async callTool() {
+      calls++;
+      return { content: [{ type: "image", data: "secret-binary" }, { type: "text", text: "visible" }] };
+    },
+  };
+  setDatadogClientForTesting(client as any);
+  const provider = getDatadogCapabilityProvider();
+  const ctx = { cwd: process.cwd() } as any;
+  await assert.rejects(provider.call("datadog_create_monitor", {}, ctx), /approved read-only/);
+  const result = await provider.call("datadog_logs", {}, ctx) as any;
+  assert.match(result.content[0].text, /visible/);
+  assert.doesNotMatch(result.content[0].text, /secret-binary/);
+  assert.equal(calls, 1);
+  setDatadogClientForTesting(undefined);
 });
 
 test("Datadog tool calls reject a late result from an invalidated client", async () => {

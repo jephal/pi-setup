@@ -18,6 +18,7 @@ test("Plan mode allows context tools while Review mode keeps the conservative se
 	assert.equal(REVIEW_TOOLS.has("repo_search"), true);
 	assert.equal(REVIEW_TOOLS.has("notes_list"), false);
 	assert.equal(isPlanModeToolAllowed("datadog_logs"), true);
+	assert.equal(isPlanModeToolAllowed("datadog_create_monitor"), false);
 	assert.equal(isPlanModeToolAllowed("pi_program"), true);
 	assert.equal(isPlanModeToolAllowed("write"), false);
 	const available = ["read", "plan", "pi_program", "repo_search", "notes_list", "memory", "fovea_focus", "datadog_logs"];

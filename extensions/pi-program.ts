@@ -20,15 +20,27 @@ import {
 	routeRepoSearch,
 	validateRepoSearchInput,
 } from "./repo-search.ts";
+import {
+	MAX_NESTED_RESULT_BYTES,
+	MAX_PROGRAM_RESULT_BYTES,
+	assertPiProgramCapabilityAllowed,
+	isPiProgramCapabilityAllowed,
+	PI_PROGRAM_CAPABILITY_NAMES,
+	boundCapabilityText,
+	compactCapabilityResult,
+	normalizeCapabilityResult,
+	type HostCapability,
+} from "./capabilities.ts";
+import { createDatadogCapabilities, createFoveaCapabilities, createMemoryReadCapabilities, createNotesReadCapabilities } from "./capability-adapters.ts";
 
 export { executableExists } from "./repo-search.ts";
+export const boundText = boundCapabilityText;
+export const compactToolResult = compactCapabilityResult;
 
-/** The only capabilities exposed inside pi_program. Keep this list explicit. */
-export const PI_PROGRAM_CAPABILITIES = ["repo.read", "repo.find", "repo.grep", "repo.ls", "repo.search"] as const;
+/** Explicit CallScript registry. Namespaces make the host policy auditable. */
+export const PI_PROGRAM_CAPABILITIES = PI_PROGRAM_CAPABILITY_NAMES;
 
 const ABORTED = "Operation aborted";
-const MAX_NESTED_RESULT_BYTES = 64 * 1024;
-const MAX_PROGRAM_RESULT_BYTES = 96 * 1024;
 const MAX_READ_LINES = 2_000;
 const PROGRAM_LIMITS = {
 	maxSteps: 20,
@@ -40,59 +52,9 @@ const PROGRAM_LIMITS = {
 	maxSuspendAttempts: 5,
 } as const;
 
-type PiBuiltinDefinition = {
-	name: string;
-	description: string;
-	parameters: Record<string, unknown>;
-	execute(
-		toolCallId: string,
-		params: unknown,
-		signal: AbortSignal | undefined,
-		onUpdate: undefined,
-		ctx: ExtensionContext,
-	): Promise<unknown>;
-};
+type PiBuiltinDefinition = HostCapability;
 
-type TextBlock = { type: "text"; text: string };
-
-function isTextBlock(value: unknown): value is TextBlock {
-	return typeof value === "object" && value !== null
-		&& (value as { type?: unknown }).type === "text"
-		&& typeof (value as { text?: unknown }).text === "string";
-}
-
-/** Keep nested Pi results useful without leaking image or UI-only payloads. */
-export function boundText(text: string, maxBytes: number): string {
-	const budget = Math.max(0, Math.floor(maxBytes));
-	const encoder = new TextEncoder();
-	const bytes = encoder.encode(text);
-	if (bytes.byteLength <= budget) return text;
-	const fit = (value: string, limit: number): string => {
-		let result = new TextDecoder().decode(encoder.encode(value).slice(0, limit));
-		while (encoder.encode(result).byteLength > limit) result = result.slice(0, -1);
-		return result;
-	};
-	const marker = `\n… output truncated at ${budget} bytes`;
-	const markerBytes = encoder.encode(marker).byteLength;
-	if (markerBytes >= budget) return fit(text, budget);
-	return `${fit(text, budget - markerBytes)}${marker}`;
-}
-
-/** Keep nested Pi results useful without leaking image or UI-only payloads. */
-export function compactToolResult(result: unknown): string {
-	if (typeof result === "string") return result;
-	if (result && typeof result === "object" && Array.isArray((result as { content?: unknown }).content)) {
-		const textBlocks = (result as { content: unknown[] }).content.filter(isTextBlock);
-		if (textBlocks.length > 0) return textBlocks.map((block) => block.text).join("\n");
-		return "(non-text output omitted)";
-	}
-	if (result === undefined) return "(no output)";
-	try {
-		return JSON.stringify(result) ?? String(result);
-	} catch {
-		return String(result);
-	}
-}
+// Result helpers are re-exported above for existing consumers.
 
 function compactProgramResult(result: { status: string; output?: unknown; at?: string; error?: { message?: string }; issues?: string[]; suspensions?: unknown[] }): string {
 	let text: string;
@@ -100,15 +62,26 @@ function compactProgramResult(result: { status: string; output?: unknown; at?: s
 	else if (result.status === "invalid") text = `Invalid program: ${result.issues?.join("; ") || "validation failed"}`;
 	else if (result.status === "suspended") text = `Program suspended: ${result.suspensions?.length ?? 0} pending action(s)`;
 	else text = `Program error${result.at ? ` at ${result.at}` : ""}: ${result.error?.message || "execution failed"}`;
-	return boundText(text, MAX_PROGRAM_RESULT_BYTES);
+	return boundCapabilityText(text, MAX_PROGRAM_RESULT_BYTES);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) throw new Error(ABORTED);
 }
 
-function asBuiltinDefinition(value: unknown): PiBuiltinDefinition {
-	return value as PiBuiltinDefinition;
+function asBuiltinDefinition(name: string, value: unknown): PiBuiltinDefinition {
+	const definition = value as {
+		description: string;
+		parameters: Record<string, unknown>;
+		execute(toolCallId: string, params: unknown, signal: AbortSignal | undefined, onUpdate: unknown, ctx: ExtensionContext): Promise<unknown>;
+	};
+	return {
+		name,
+		description: definition.description,
+		access: "read-only",
+		parameters: definition.parameters,
+		execute: (args, ctx, signal) => definition.execute(`${name}:nested`, args, signal, undefined, ctx),
+	};
 }
 
 function formatSchemaIssues(schema: Record<string, unknown>, args: unknown): string {
@@ -182,8 +155,9 @@ function mountBuiltin(
 				const executable = typeof options.requiredExecutable === "function" ? options.requiredExecutable(args) : options.requiredExecutable;
 				await requireExistingExecutable(executable, operationSignal);
 			}
-			const result = await definition.execute(`${name}:nested`, args, operationSignal, undefined, ctx);
-			return boundText(compactToolResult(result), MAX_NESTED_RESULT_BYTES);
+			assertPiProgramCapabilityAllowed(definition);
+			const result = await definition.execute(args, ctx, operationSignal);
+			return normalizeCapabilityResult(result, MAX_NESTED_RESULT_BYTES);
 		},
 	});
 }
@@ -195,18 +169,25 @@ function mountBuiltin(
  */
 function createBuiltinDefinitions(cwd: string): PiBuiltinDefinition[] {
 	return [
-		asBuiltinDefinition(createReadToolDefinition(cwd)),
-		asBuiltinDefinition(createFindToolDefinition(cwd)),
-		asBuiltinDefinition(createGrepToolDefinition(cwd)),
-		asBuiltinDefinition(createLsToolDefinition(cwd)),
+		asBuiltinDefinition("repo.read", createReadToolDefinition(cwd)),
+		asBuiltinDefinition("repo.find", createFindToolDefinition(cwd)),
+		asBuiltinDefinition("repo.grep", createGrepToolDefinition(cwd)),
+		asBuiltinDefinition("repo.ls", createLsToolDefinition(cwd)),
+		asBuiltinDefinition("repo.search", createRepoSearchToolDefinition()),
+		...createFoveaCapabilities(),
+		...createNotesReadCapabilities(),
+		...createMemoryReadCapabilities(),
+		...createDatadogCapabilities(),
 	];
 }
 
+function approvedDefinitions(definitions: PiBuiltinDefinition[]): PiBuiltinDefinition[] {
+	return definitions.filter(isPiProgramCapabilityAllowed);
+}
+
 function createProgramMetadata(): ScriptTool[] {
-	const definitions = [...createBuiltinDefinitions(process.cwd()), asBuiltinDefinition(createRepoSearchToolDefinition())];
-	const names = PI_PROGRAM_CAPABILITIES;
-	return definitions.map((definition, index) => tool({
-		name: names[index],
+	return approvedDefinitions(createBuiltinDefinitions(process.cwd())).map((definition) => tool({
+		name: definition.name,
 		description: definition.description,
 		inputSchema: definition.parameters,
 		execute: async () => { throw new Error("pi_program metadata tool cannot execute"); },
@@ -226,18 +207,18 @@ function createProgramEngine(cwd: string, outerSignal: AbortSignal | undefined, 
  * than a cwd captured when the extension was loaded.
  */
 export function createPiProgramTools(cwd: string, outerSignal: AbortSignal | undefined, ctx: ExtensionContext): ScriptTool[] {
-	const [read, find, grep, ls] = createBuiltinDefinitions(cwd);
-	const search = asBuiltinDefinition(createRepoSearchToolDefinition());
-	return [
-		mountBuiltin("repo.read", read, outerSignal, ctx, { pathArg: "path" }),
-		mountBuiltin("repo.find", find, outerSignal, ctx, { pathArg: "path", requiredExecutable: "fd" }),
-		mountBuiltin("repo.grep", grep, outerSignal, ctx, { pathArg: "path", requiredExecutable: "rg" }),
-		mountBuiltin("repo.ls", ls, outerSignal, ctx, { pathArg: "path" }),
-		mountBuiltin("repo.search", search, outerSignal, ctx, {
-			pathArg: "path",
-			requiredExecutable: (args) => routeRepoSearch(args as any).kind === "files" ? "fd" : "rg",
-		}),
-	];
+	const definitions = approvedDefinitions(createBuiltinDefinitions(cwd));
+	return definitions.map((definition) => {
+		// The registry is an explicit fail-closed mount boundary.
+		assertPiProgramCapabilityAllowed(definition);
+		return mountBuiltin(definition.name as (typeof PI_PROGRAM_CAPABILITIES)[number], definition, outerSignal, ctx, {
+		pathArg: definition.name.startsWith("repo.") ? "path" : undefined,
+		requiredExecutable: definition.name === "repo.find" ? "fd"
+			: definition.name === "repo.grep" ? "rg"
+			: definition.name === "repo.search" ? (args) => routeRepoSearch(args as any).kind === "files" ? "fd" : "rg"
+				: undefined,
+		});
+	});
 }
 
 export function createPiProgramTool(): ToolDefinition {
@@ -248,9 +229,10 @@ export function createPiProgramTool(): ToolDefinition {
 		description: `${promptDefinition.description}\n\nNested calls are read-only, repository-scoped, and bypass Pi's outer tool_call event.`,
 		promptSnippet: "Run a bounded read-only repository program",
 		promptGuidelines: [
-			"Use only repo.read, repo.find, repo.grep, repo.ls, and repo.search inside the program.",
+			"Use repo.*, fovea.*, notes.list/search/read, memory.search/list, and datadog.search/describe/call for read-only work.",
 			"repo.search auto routes glob-like queries to files and other queries to text; set mode to override.",
-			"Nested calls are read-only and bypass Pi's outer tool_call event; the mounted capability boundary is authoritative.",
+			"Writes, edit, bash, Herdr, scheduled tasks, subagents, interactive tools, and all other unlisted capabilities are direct-only and rejected.",
+			"Nested calls bypass Pi's outer tool_call event; the host capability policy and bounded result adapter are authoritative.",
 		],
 		parameters: Type.Unsafe(promptDefinition.inputSchema as TSchema),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -268,7 +250,7 @@ export function createPiProgramTool(): ToolDefinition {
 				// as normal error results. Preserve cancellation for Pi's host pipeline.
 				throwIfAborted(outerSignal);
 				const message = error instanceof Error ? error.message : String(error);
-				return { content: [{ type: "text", text: boundText(`Program error: ${message}`, MAX_PROGRAM_RESULT_BYTES) }], details: { status: "error" } };
+				return { content: [{ type: "text", text: boundCapabilityText(`Program error: ${message}`, MAX_PROGRAM_RESULT_BYTES) }], details: { status: "error" } };
 			}
 		},
 	};
