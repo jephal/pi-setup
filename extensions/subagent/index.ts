@@ -50,6 +50,7 @@ import {
 	type ModelTier,
 	type ResolvedAgentModel,
 	resolveAgentModel,
+	thinkingRoute,
 } from "./models.ts";
 import {
 	createMcpForwardingBridge,
@@ -309,7 +310,7 @@ export function unsupportedChildToolNames(agent: AgentConfig): string[] {
 
 /** Uses the active catalog for both child CLI arguments and displayed metadata. */
 export function resolveChildInvocation(
-	agent: Pick<AgentConfig, "model"> & Partial<Pick<AgentConfig, "name" | "modelTier">>,
+	agent: Pick<AgentConfig, "model" | "thinkingLevel"> & Partial<Pick<AgentConfig, "name" | "modelTier">>,
 	parentCtx: Pick<ExtensionContext, "model" | "thinkingLevel" | "modelRegistry">,
 	overrideTier?: ModelTier,
 ): { resolved: ResolvedAgentModel; args: string[] } {
@@ -321,14 +322,17 @@ export function resolveChildInvocation(
 	const resolved = resolveAgentModel(agent, parentCtx.model ?? {}, overrideTier, availableModels);
 	if (resolved.model) {
 		args.push("--model", resolved.model);
-		if (resolved.source === "parent" && parentCtx.thinkingLevel) args.push("--thinking", parentCtx.thinkingLevel);
+		const thinkingLevel = (resolved.tier ? thinkingRoute(agent.name ?? "", resolved.tier) : undefined)
+			?? agent.thinkingLevel
+			?? parentCtx.thinkingLevel;
+		if (thinkingLevel) args.push("--thinking", thinkingLevel);
 	}
 	return { resolved, args };
 }
 
 /** Builds child CLI arguments while retaining legacy parent model and thinking defaults. */
 export function buildChildArgs(
-	agent: Pick<AgentConfig, "model"> & Partial<Pick<AgentConfig, "name" | "modelTier">>,
+	agent: Pick<AgentConfig, "model" | "thinkingLevel"> & Partial<Pick<AgentConfig, "name" | "modelTier">>,
 	parentCtx: Pick<ExtensionContext, "model" | "thinkingLevel" | "modelRegistry">,
 	overrideTier?: ModelTier,
 ): string[] {
@@ -675,11 +679,12 @@ async function runSingleAgent(
 }
 
 const BUNDLED_AGENT_GUIDANCE = [
-	"scout — fast repository reconnaissance (default fast: gpt-5.6-luna)",
-	"planner — read-only implementation planning (default medium: claude-sonnet-5; complex: claude-opus-5)",
-	"reviewer — read-only code quality and security review (default medium: claude-sonnet-5; complex: claude-opus-5)",
-	"worker — general implementation with full capabilities (default medium: gpt-5.6-terra)",
-	"datadog-investigator — read-only evidence-first Datadog investigation (default fast: gpt-5.6-luna)",
+	"scout — fast repository reconnaissance (default fast: gpt-6-luna, medium thinking)",
+	"planner — read-only implementation planning (default medium: claude-opus-5.5, low thinking)",
+	"reviewer — read-only code quality and security review (default medium: claude-opus-5.5, low thinking)",
+	"worker — general implementation with full capabilities (default medium: gpt-6-sol, medium thinking)",
+	"datadog-investigator — read-only evidence-first Datadog investigation (default fast: gpt-6-luna, medium thinking)",
+	`Tier routes: ${MODEL_ROUTE_SUMMARY}`,
 ].join("; ");
 const AGENT_NAME_DESCRIPTION = `Exact bundled agent names: ${BUNDLED_AGENT_GUIDANCE}. Custom user/project agents may also be available; they are discovered at runtime.`;
 const MODEL_TIER_DESCRIPTION = `Optional model tier override. Use fast for clear low-risk work and medium by default. Treat complex as a rare exception; use it only for genuinely ambiguous architecture, security or concurrency risk, difficult debugging, high-cost failure, or a failed medium attempt. When unsure, choose medium, and upgrade only the affected step. Routes: ${MODEL_ROUTE_SUMMARY}.`;
@@ -897,7 +902,10 @@ async function prepareBackgroundSpec(
 		const childArgs = ["--mode", "rpc", "--no-session"];
 		if (resolved.model) {
 			childArgs.push("--model", resolved.model);
-			if (resolved.source === "parent" && ctx.thinkingLevel) childArgs.push("--thinking", ctx.thinkingLevel);
+			const thinkingLevel = (resolved.tier ? thinkingRoute(agent.name, resolved.tier) : undefined)
+				?? agent.thinkingLevel
+				?? ctx.thinkingLevel;
+			if (thinkingLevel) childArgs.push("--thinking", thinkingLevel);
 		}
 		childArgs.push("--tools", backgroundChildProcessToolNames(toolNames, forwardingBridge?.toolNames).join(","));
 		if (agent.systemPrompt.trim()) {

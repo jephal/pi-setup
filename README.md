@@ -223,9 +223,9 @@ route for ordinary work; the main model can override a single call, parallel
 item, or chain step with `modelTier` when the task warrants it.
 
 ```text
-fast     → gpt-5.6-luna
-medium   → claude-sonnet-5 for planning/review, gpt-5.6-terra for implementation
-complex  → claude-opus-5 for planning/review, gpt-5.6-sol for implementation
+fast     → role-specific; gpt-5.6-luna for unconfigured roles
+medium   → role-specific; gpt-6-sol for unconfigured roles
+complex  → role-specific; gpt-5.6-sol for unconfigured roles
 ```
 
 Tier routes use these model IDs logically rather than requiring the documented
@@ -233,17 +233,24 @@ provider. When the active catalog exposes a target ID through the parent
 provider, subagents use that provider; otherwise they use another available
 provider for the ID. If the target is unavailable, they retain the active parent
 model. When both `modelTier` and `model` are present, `modelTier` takes
-precedence. An explicit agent `model:` is used when no tier is set.
+precedence. An explicit agent `model:` is used when no tier is set. Thinking
+levels are configured separately from model tiers: children inherit the parent's
+level unless an agent specifies `thinkingLevel:`.
 
-Default presets:
+Default tiers and per-tier model/thinking routes:
 
-```text
-scout                 → fast / gpt-5.6-luna
-planner               → medium / claude-sonnet-5
-reviewer              → medium / claude-sonnet-5
-worker                → medium / gpt-5.6-terra
-datadog-investigator  → fast / gpt-5.6-luna
-```
+| Agent | Default tier | Fast | Medium | Complex |
+| --- | --- | --- | --- | --- |
+| Scout | Fast | GPT-6 Luna / medium | GPT-6 Luna / high | GPT-6 Luna / xhigh |
+| Planner | Medium | GPT-6 Luna / high | Claude Opus 5.5 / low | Claude Opus 5.5 / medium |
+| Reviewer | Medium | GPT-6 Luna / high | Claude Opus 5.5 / low | Claude Opus 5.5 / medium |
+| Worker | Medium | GPT-6 Luna / high | GPT-6 Sol / medium | Claude Opus 5.5 / medium |
+| Datadog investigator | Fast | GPT-6 Luna / medium | GPT-6 Luna / high | GPT-6 Luna / xhigh |
+
+Each cell shows `model / thinking level`. The main Pi model remains GPT-6 Luna at
+high thinking. Custom agents without role-specific routes continue to use the
+fallback tier models above and inherit the parent thinking level unless they
+set `thinkingLevel:`.
 
 Choose `fast` for reconnaissance, simple searches, short summaries, and clear
 low-risk tasks. Choose `medium` by default for ordinary planning, review, tests,
