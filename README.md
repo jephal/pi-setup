@@ -26,6 +26,17 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Auto mode
   - Review mode
   - Shared approval HITL UI
+- Repository search
+  - Gives Pi a native `repo_search` router for file-name and text searches
+  - Auto routes glob-like queries to `find` and other queries to `grep`; explicit modes override
+  - Shares the same router with the `repo.search` CallScript capability
+- CallScript Pi programs
+  - Gives Pi one `pi_program` tool backed by CallScript's neutral core API
+  - Mounts repository reads, bounded `repo.edit`/`repo.write`, public Fovea sketch/focus/dwell/impact, Notes list/search/read, Memory search/list, and parent-owned dynamic Datadog search/describe/call
+  - Uses per-operation confirmation in Manual/Approve, explicit `suspend:true` confirmation in Auto, and blocks writes in Review/Plan and all headless modes
+  - Uses a shared access policy and bounded text normalization; repository operations remain inside the execution cwd
+  - Keeps bash, shell/Herdr, scheduled tasks, MCP mutation, Notes/Memory mutation, and subagents direct-only
+  - The nested calls bypass Pi's `tool_call` event, so the intrinsic capability and approval boundary is authoritative
 - Herdr shell integration
   - Gives Pi a `herdr_shell` tool for long-running commands and local servers
   - Creates one right-side pane in the current Herdr tab, never a new tab or workspace
@@ -137,6 +148,31 @@ only `mcp_read` and resource-read permissions (not `mcp_write`), and keep
 `DD_MCP_ENDPOINT_PATH` limited to the configured `core`, `error-tracking`, and `rum`
 toolsets. The extension does not infer permissions from tool names or apply a `write`
 name heuristic; unexpected endpoint toolsets are rejected.
+
+## Repository search and CallScript programs
+
+The package registers `repo_search`, a native repository search router, and `pi_program`, a bounded CallScript runner for repository inspection and narrowly scoped repository edits. `repo_search` uses Pi's native `find` and `grep` implementations: glob-like queries route to file names, and other queries route to file contents. Set `mode` to `files` or `text` to override auto routing. The compact shared schema accepts `query`, `mode`, `path`, `glob`, `ignoreCase`, `literal`, `context`, and `limit` as relevant to the selected search.
+
+CallScript compiles the submitted JavaScript into a validated plan; it does not execute model-authored JavaScript. The neutral registry is an explicit host-capability catalog with shared access classification and bounded result normalization. It contains:
+
+- `repo.read`, `repo.find`, `repo.grep`, `repo.ls`, and `repo.search`
+- `repo.edit` and `repo.write`, the only CallScript side effects
+- `fovea.sketch`, `fovea.focus`, `fovea.dwell`, and `fovea.impact` through the public `pi-fovea/ops` export
+- `notes.list`, `notes.search`, and `notes.read`
+- `memory.search` and `memory.list` (without recording retrieval usage)
+- Parent-owned dynamic `datadog.search`, `datadog.describe`, and `datadog.call`
+
+Each invocation builds the registry for the execution cwd. Nested arguments are validated against the capability schemas before dispatch. Results are normalized to bounded text, and image/UI-only blocks are omitted. The adapter checks the outer abort signal before every nested call and during active operations. Dynamic Datadog calls stay in the parent OAuth/MCP lifecycle; each call refreshes and revalidates the remote lifecycle, exact name, and current input schema, and no credential is passed into CallScript.
+
+Paths are resolved within the execution cwd. Absolute paths are allowed only when they remain inside that directory; paths using `~`, `..`, or `file://`, and symlinks, are rejected when resolution would escape it. This keeps the pilot repository-scoped rather than inheriting Pi's unrestricted path behavior.
+
+The pilot uses conservative CallScript bounds: 20 steps, 25 calls per fan-out, 50 worst-case calls per script, five concurrent calls, 64 KiB per nested result, and a 96 KiB final result. Nested inputs also cap `read.limit` at 2,000 lines, search limits at 2,000 results, and grep context at 20 lines. `repo.write` content is limited to 32 KiB; `repo.edit` accepts at most 10 replacements, with 8 KiB per old/new text and 32 KiB total. Side-effect fan-out with `each`, detached programs/steps, and edit/write steps without a non-empty reason are rejected. `find` and `grep` require an existing `fd` and `rg` executable. The adapter never invokes Pi's downloader, so missing binaries produce a compact error and do not write a tool cache or access the network.
+
+CallScript dispatches nested calls directly, so they do not emit Pi's outer `tool_call` event. The mount boundary is authoritative, and the bridge calls only the explicit host adapters for the capabilities listed above.
+
+`repo.edit` and `repo.write` use CallScript's suspension and resolution protocol inside the same outer `pi_program` execution. Manual and Approve modes ask for confirmation for each operation. The approval preview shows the repository path, the required reason, and a bounded old/new edit or proposed-content preview. CallScript state is retained while approvals are collected, then the script resumes only after the outstanding decisions resolve. A denial resumes as a failed operation and does not dispatch that write. Auto mode runs side effects without a prompt unless the script explicitly sets `suspend: true`; that explicit suspension still requires confirmation. Review and Plan modes block side effects. All headless sessions block repository writes, including Auto, because they cannot show an interactive approval.
+
+The other mutation and command capabilities remain direct-only: `bash`, shell and Herdr commands, Notes/Memory mutation, Datadog mutation, scheduled tasks, interactive tools, and subagents. Pi's built-in `write` and `edit` tools are not mounted as generic CallScript tools; only the bounded `repo.write` and `repo.edit` adapters are available.
 
 ## Local notes integration
 

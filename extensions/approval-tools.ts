@@ -1,5 +1,7 @@
 /** The original conservative tool set used by Review mode. */
-export const REVIEW_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "ask_questions", "plan"]);
+import { isDatadogReadOnlyToolName } from "./datadog-mcp.ts";
+
+export const REVIEW_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "ask_questions", "plan", "pi_program", "repo_search"]);
 
 // Read-only shell commands allowed by Plan and Review modes.
 const SAFE_BASH = [
@@ -39,9 +41,9 @@ export function readOnlyToolNames(mode: ReadOnlyMode, availableTools: readonly s
 	return [...allowed].filter((tool) => available.has(tool));
 }
 
-/** Datadog investigation tools are loaded dynamically and are read-only. */
+/** Dynamic Datadog tools must also pass the shared read-only manifest. */
 export function isPlanModeToolAllowed(toolName: string): boolean {
-	return PLAN_TOOLS.has(toolName) || toolName.startsWith("datadog_");
+	return PLAN_TOOLS.has(toolName) || isDatadogReadOnlyToolName(toolName);
 }
 
 /** Preserve tools activated while read-only without re-adding temporary tools. */

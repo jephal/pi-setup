@@ -45,6 +45,10 @@ test("package loads optional tool-group resetters before approval policy snapsho
   const approvalIndex = manifest.pi.extensions.indexOf("extensions/approval-modes.ts");
   assert.ok(manifest.pi.extensions.indexOf("extensions/scheduled-tasks.ts") < approvalIndex);
   assert.ok(manifest.pi.extensions.indexOf("extensions/notes.ts") < approvalIndex);
+  const repoSearchIndex = manifest.pi.extensions.indexOf("extensions/repo-search.ts");
+  const piProgramIndex = manifest.pi.extensions.indexOf("extensions/pi-program.ts");
+  assert.ok(repoSearchIndex < piProgramIndex);
+  assert.ok(piProgramIndex < approvalIndex);
 });
 
 test("scheduler loader keeps operations optional and avoids repeated active-tools churn", () => {

@@ -75,11 +75,30 @@ async function saveSettings(settings: MemorySettings): Promise<void> {
 const memoryOperationQueue = new MemoryOperationQueue();
 
 /** Serialize store lifecycles so concurrent tool calls cannot race SQLite setup or writes. */
-function withStore<T>(operation: (store: MemoryStore) => T): Promise<T> {
+export function withMemoryStore<T>(operation: (store: MemoryStore) => T): Promise<T> {
 	return memoryOperationQueue.run(() => {
 		const store = new MemoryStore(databasePath());
 		try {
 			return operation(store);
+		} finally {
+			store.close();
+		}
+	});
+}
+
+/**
+ * Read an existing memory database without creating any filesystem state.
+ * Fresh-install reads return undefined and are therefore genuinely side-effect-free.
+ */
+export function withMemoryStoreReadOnly<T>(operation: (store: MemoryStore) => T, signal?: AbortSignal): Promise<T | undefined> {
+	return memoryOperationQueue.run(() => {
+		if (signal?.aborted) throw new Error("Operation aborted");
+		const store = MemoryStore.openReadOnly(databasePath());
+		if (!store) return undefined;
+		try {
+			const result = operation(store);
+			if (signal?.aborted) throw new Error("Operation aborted");
+			return result;
 		} finally {
 			store.close();
 		}
@@ -98,13 +117,15 @@ function category(value: unknown, fallback: MemoryCategory = "fact"): MemoryCate
 	throw new Error("Memory category must be preference, fact, decision, or workflow");
 }
 
-function formatMemory(record: MemorySearchResult | ReturnType<MemoryStore["get"]>): string {
+export function formatMemory(record: MemorySearchResult | ReturnType<MemoryStore["get"]>): string {
 	if (!record) return "(memory not found)";
 	const tags = record.tags.length ? ` [${record.tags.join(", ")}]` : "";
 	const score = "score" in record ? ` score=${record.score.toFixed(2)}` : "";
 	const core = record.alwaysInject ? " · core" : "";
 	return `${record.id} · ${record.scope}/${record.category}${core}${tags}${score}\n${record.content}`;
 }
+
+const withStore = withMemoryStore;
 
 function formatResults(results: MemorySearchResult[]): string {
 	return results.length ? results.map((record) => formatMemory(record)).join("\n\n") : "No memories found.";
