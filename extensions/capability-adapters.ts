@@ -1,5 +1,9 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	createEditToolDefinition,
+	createWriteToolDefinition,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolve } from "node:path";
@@ -14,6 +18,9 @@ import { getDatadogCapabilityProvider, type DatadogCapabilityProvider } from "./
 
 const MAX_NOTES_OUTPUT_BYTES = 50 * 1024;
 const MAX_NOTES_LIST_LIMIT = 500;
+export const MAX_REPO_WRITE_BYTES = 32 * 1024;
+export const MAX_REPO_EDIT_COUNT = 10;
+export const MAX_REPO_EDIT_TEXT_BYTES = 8 * 1024;
 
 const notesListParameters = Type.Object({
 	path: Type.Optional(Type.String()),
@@ -145,10 +152,61 @@ function formatBoundedMemories(results: Array<MemoryRecord | MemorySearchResult>
 function capability(
 	name: string,
 	description: string,
-	parameters: Record<string, unknown>,
+	parameters: any,
 	execute: (args: any, ctx: ExtensionContext, signal?: AbortSignal) => Promise<unknown>,
+	access: HostCapability["access"] = "read-only",
 ): HostCapability {
-	return { name, description, access: "read-only", parameters, execute };
+	return { name, description, access, parameters, execute };
+}
+
+const repoEditParameters = Type.Object({
+	path: Type.String({ minLength: 1, maxLength: 1_024, description: "Repository-relative file path." }),
+	edits: Type.Array(Type.Object({
+		oldText: Type.String({ maxLength: MAX_REPO_EDIT_TEXT_BYTES }),
+		newText: Type.String({ maxLength: MAX_REPO_EDIT_TEXT_BYTES }),
+	}), { minItems: 1, maxItems: MAX_REPO_EDIT_COUNT }),
+});
+const repoWriteParameters = Type.Object({
+	path: Type.String({ minLength: 1, maxLength: 1_024, description: "Repository-relative file path." }),
+	content: Type.String({ maxLength: MAX_REPO_WRITE_BYTES }),
+});
+
+export function validateRepoSideEffectBounds(name: string, args: Record<string, unknown>): void {
+	const byteLength = (value: unknown): number => typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0;
+	if (byteLength(args.path) > 1_024) throw new Error(`${name} path exceeds 1,024 UTF-8 bytes`);
+	if (name === "repo.write") {
+		if (byteLength(args.content) > MAX_REPO_WRITE_BYTES) throw new Error(`repo.write content exceeds ${MAX_REPO_WRITE_BYTES} UTF-8 bytes`);
+		return;
+	}
+	if (!Array.isArray(args.edits) || args.edits.length < 1 || args.edits.length > MAX_REPO_EDIT_COUNT) {
+		throw new Error(`repo.edit requires between 1 and ${MAX_REPO_EDIT_COUNT} edits`);
+	}
+	let totalBytes = 0;
+	for (const edit of args.edits) {
+		const item = edit as Record<string, unknown>;
+		for (const field of ["oldText", "newText"] as const) {
+			const bytes = byteLength(item[field]);
+			if (bytes > MAX_REPO_EDIT_TEXT_BYTES) throw new Error(`repo.edit ${field} exceeds ${MAX_REPO_EDIT_TEXT_BYTES} UTF-8 bytes`);
+			totalBytes += bytes;
+		}
+	}
+	if (totalBytes > MAX_REPO_WRITE_BYTES) throw new Error(`repo.edit input exceeds ${MAX_REPO_WRITE_BYTES} UTF-8 bytes`);
+}
+
+/** Only the two reviewed, repository-bounded Pi file tools are side-effect mounts. */
+export function createRepoSideEffectCapabilities(cwd: string): HostCapability[] {
+	const edit = createEditToolDefinition(cwd);
+	const write = createWriteToolDefinition(cwd);
+	return [
+		capability("repo.edit", "Apply up to 10 exact, bounded text replacements to one repository file. Requires a user confirmation outside Auto mode.", repoEditParameters, async (args, ctx, signal) => {
+			validateRepoSideEffectBounds("repo.edit", args);
+			return edit.execute("repo.edit:nested", args, signal ?? ctx.signal, undefined as any, ctx);
+		}, "side-effect"),
+		capability("repo.write", "Create or replace one repository file with bounded content. Requires a user confirmation outside Auto mode.", repoWriteParameters, async (args, ctx, signal) => {
+			validateRepoSideEffectBounds("repo.write", args);
+			return write.execute("repo.write:nested", args, signal ?? ctx.signal, undefined as any, ctx);
+		}, "side-effect"),
+	];
 }
 
 export function createFoveaCapabilities(): HostCapability[] {

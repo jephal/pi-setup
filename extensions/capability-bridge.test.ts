@@ -9,10 +9,15 @@ import { MemoryStore } from "../src/memory/db.ts";
 
 const context = (cwd: string) => ({ cwd, signal: undefined, model: undefined } as any);
 
-test("the shared policy admits only read classes and explicitly rejects direct-only capabilities", () => {
+test("the shared policy admits read classes and only the explicit repository side effects", () => {
 	assert.equal(isPiProgramCapabilityAllowed({ name: "notes.search", access: "read-only" }), true);
 	assert.equal(isPiProgramCapabilityAllowed({ name: "datadog.call", access: "dynamic-read" }), true);
+	assert.equal(isPiProgramCapabilityAllowed({ name: "repo.edit", access: "side-effect" }), true);
+	assert.equal(isPiProgramCapabilityAllowed({ name: "repo.write", access: "side-effect" }), true);
+	assert.equal(isPiProgramCapabilityAllowed({ name: "repo.edit", access: "write" }), false);
 	assert.equal(isPiProgramCapabilityAllowed({ name: "notes.write", access: "write" }), false);
+	assert.equal(isPiProgramCapabilityAllowed({ name: "notes.write", access: "side-effect" }), false);
+	assert.equal(isPiProgramCapabilityAllowed({ name: "datadog.create_monitor", access: "side-effect" }), false);
 	assert.equal(isPiProgramCapabilityAllowed({ name: "unknown", access: "interactive" }), false);
 	assert.equal(isPiProgramCapabilityAllowed({ name: "future.read", access: "read-only" }), false);
 	assert.equal(PI_PROGRAM_ALLOWED_CAPABILITIES.has("future.read"), false);

@@ -12,6 +12,14 @@ function context(cwd: string) {
 	return { cwd, signal: undefined, model: undefined } as any;
 }
 
+function interactiveContext(cwd: string, confirm: (title: string, message: string) => Promise<boolean>) {
+	return { cwd, signal: undefined, model: undefined, hasUI: true, ui: { confirm } } as any;
+}
+
+function fakePi(events: unknown[] = []) {
+	return { events: { emit(name: string, data: unknown) { events.push([name, data]); } } } as any;
+}
+
 test("registers only the pi_program host tool", () => {
 	const definitions: Array<{ name: string }> = [];
 	const fakePi = { registerTool(definition: { name: string }) { definitions.push(definition); } };
@@ -19,14 +27,16 @@ test("registers only the pi_program host tool", () => {
 	assert.deepEqual(definitions.map((definition) => definition.name), ["pi_program"]);
 });
 
-test("mounts the approved read-only capability registry and no direct-only tools", () => {
+test("mounts the explicit capability registry and keeps other side effects direct-only", () => {
 	const tools = createPiProgramTools(process.cwd(), undefined, context(process.cwd()));
 	assert.deepEqual(tools.map((entry) => entry.name), [...PI_PROGRAM_CAPABILITIES]);
 	assert.ok(tools.some((entry) => entry.name === "fovea.focus"));
 	assert.ok(tools.some((entry) => entry.name === "notes.search"));
 	assert.ok(tools.some((entry) => entry.name === "memory.list"));
 	assert.ok(tools.some((entry) => entry.name === "datadog.call"));
-	assert.equal(tools.some((entry) => /bash|shell|write|edit|mcp|subagent/i.test(entry.name)), false);
+	assert.ok(tools.some((entry) => entry.name === "repo.edit"));
+	assert.ok(tools.some((entry) => entry.name === "repo.write"));
+	assert.equal(tools.some((entry) => ["bash", "shell", "write", "edit", "notes.write", "memory.save", "subagent"].includes(entry.name)), false);
 });
 
 test("binds nested repository reads to the execution cwd", async () => {
@@ -134,6 +144,283 @@ test("runs Notes and Memory context capabilities through CallScript", async () =
 		else process.env.NOTES_PATH = previousNotes;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runs bounded repository edit/write capabilities in Auto without prompting", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-repo-write-"));
+	let confirmations = 0;
+	try {
+		await writeFile(join(cwd, "edit.txt"), "old text\n", "utf8");
+		const tool = createPiProgramTool(() => "auto", fakePi());
+		const written = await tool.execute("program", {
+			script: 'await repo.write({ path: "created.txt", content: "new file\\n" }, { reason: "create the requested file" }); return "written";',
+		}, undefined, undefined, interactiveContext(cwd, async () => { confirmations++; return true; }));
+		const edited = await tool.execute("program", {
+			script: 'await repo.edit({ path: "edit.txt", edits: [{ oldText: "old text", newText: "new text" }] }, { reason: "update the requested text" }); return "edited";',
+		}, undefined, undefined, interactiveContext(cwd, async () => { confirmations++; return true; }));
+		assert.match(written.content[0].text, /written/);
+		assert.match(edited.content[0].text, /edited/);
+		assert.equal(await import("node:fs/promises").then(({ readFile }) => readFile(join(cwd, "created.txt"), "utf8")), "new file\n");
+		assert.equal(await import("node:fs/promises").then(({ readFile }) => readFile(join(cwd, "edit.txt"), "utf8")), "new text\n");
+		assert.equal(confirmations, 0);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("Manual and Approve modes confirm each operation and resume the same program", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-manual-approval-"));
+	const blockerEvents: unknown[] = [];
+	let confirmations = 0;
+	let approvalMode: "manual" | "approve" = "manual";
+	const tool = createPiProgramTool(() => approvalMode, fakePi(blockerEvents));
+	const ctx = interactiveContext(cwd, async (title, message) => {
+		confirmations++;
+		assert.match(title, /repo\.write/);
+		assert.match(message, /Path: approved\.txt/);
+		assert.match(message, /Reason: requested change/);
+		assert.match(message, /New content:/);
+		assert.match(message, /approved content/);
+		return true;
+	});
+	const script = 'await repo.write({ path: "approved.txt", content: "approved content" }, { reason: "requested change" }); return "complete";';
+	try {
+		for (approvalMode of ["manual", "approve"]) {
+			const result = await tool.execute("program", { script }, undefined, undefined, ctx);
+			assert.equal(result.content[0].text, "complete");
+			assert.equal(await import("node:fs/promises").then(({ readFile }) => readFile(join(cwd, "approved.txt"), "utf8")), "approved content");
+		}
+		assert.equal(confirmations, 2);
+		assert.equal(blockerEvents.filter(([name, event]) => name === "herdr:blocked" && (event as any).active).length, 2);
+		assert.equal(blockerEvents.filter(([name, event]) => name === "herdr:blocked" && !(event as any).active).length, 2);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("multiple side effects in one program each receive a decision without replaying settled edits", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-multiple-approvals-"));
+	let confirmations = 0;
+	try {
+		await writeFile(join(cwd, "first.txt"), "before", "utf8");
+		const result = await createPiProgramTool(() => "manual", fakePi()).execute(
+			"program",
+			{ script: 'await repo.edit({ path: "first.txt", edits: [{ oldText: "before", newText: "after" }] }, { reason: "edit first file" }); await repo.write({ path: "second.txt", content: "second" }, { reason: "write second file" }); return "complete";' },
+			undefined,
+			undefined,
+			interactiveContext(cwd, async (_title, message) => { confirmations++; assert.match(message, /Reason: (edit first file|write second file)/); return true; }),
+		);
+		assert.equal(result.content[0].text, "complete");
+		assert.equal(confirmations, 2);
+		assert.equal(await import("node:fs/promises").then(({ readFile }) => readFile(join(cwd, "first.txt"), "utf8")), "after");
+		assert.equal(await import("node:fs/promises").then(({ readFile }) => readFile(join(cwd, "second.txt"), "utf8")), "second");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("repo.write approval preview shows its full maximum-size content", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-write-preview-full-"));
+	const content = "full-write-content-" + "w".repeat(32 * 1024 - "full-write-content-".length);
+	let message = "";
+	try {
+		const result = await createPiProgramTool(() => "manual", fakePi()).execute(
+			"program",
+			{ script: `await repo.write(${JSON.stringify({ path: "large.txt", content })}, { reason: "inspect the complete write" });` },
+			undefined,
+			undefined,
+			interactiveContext(cwd, async (_title, preview) => { message = preview; return false; }),
+		);
+		assert.match(result.content[0].text, /declined to run "repo\.write"/);
+		assert.ok(message.includes(content), "approval preview must contain the complete authorized file contents");
+		assert.doesNotMatch(message, /output truncated/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("repo.edit approval preview shows all bounded replacement text", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-edit-preview-full-"));
+	const edits = Array.from({ length: 4 }, (_, index) => {
+		const oldPrefix = `old-${index}-`;
+		const newPrefix = `new-${index}-`;
+		return {
+			oldText: oldPrefix + "o".repeat(4 * 1024 - oldPrefix.length),
+			newText: newPrefix + "n".repeat(4 * 1024 - newPrefix.length),
+		};
+	});
+	let message = "";
+	try {
+		await writeFile(join(cwd, "large.txt"), "before", "utf8");
+		const result = await createPiProgramTool(() => "manual", fakePi()).execute(
+			"program",
+			{ script: `await repo.edit(${JSON.stringify({ path: "large.txt", edits })}, { reason: "inspect all replacements" });` },
+			undefined,
+			undefined,
+			interactiveContext(cwd, async (_title, preview) => { message = preview; return false; }),
+		);
+		assert.match(result.content[0].text, /declined to run "repo\.edit"/);
+		assert.ok(edits.every(({ oldText, newText }) => message.includes(oldText) && message.includes(newText)));
+		assert.doesNotMatch(message, /output truncated/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("the edit approval preview includes the exact bounded old and new text", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-edit-preview-"));
+	try {
+		await writeFile(join(cwd, "preview.txt"), "before", "utf8");
+		const result = await createPiProgramTool(() => "manual", fakePi()).execute(
+			"program",
+			{ script: 'await repo.edit({ path: "preview.txt", edits: [{ oldText: "before", newText: "after" }] }, { reason: "replace the requested phrase" });' },
+			undefined,
+			undefined,
+			interactiveContext(cwd, async (_title, message) => {
+				assert.match(message, /Path: preview\.txt/);
+				assert.match(message, /Reason: replace the requested phrase/);
+				assert.match(message, /Edit 1 old:\nbefore/);
+				assert.match(message, /Edit 1 new:\nafter/);
+				return true;
+			}),
+		);
+		assert.match(result.content[0].text, /Successfully replaced/);
+		assert.equal(await import("node:fs/promises").then(({ readFile }) => readFile(join(cwd, "preview.txt"), "utf8")), "after");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a denied side-effect approval resumes as a denial without writing", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-deny-"));
+	try {
+		const result = await createPiProgramTool(() => "approve", fakePi()).execute(
+			"program",
+			{ script: 'await repo.write({ path: "denied.txt", content: "must not be written" }, { reason: "test denial" });' },
+			undefined,
+			undefined,
+			interactiveContext(cwd, async () => false),
+		);
+		assert.match(result.content[0].text, /declined to run "repo\.write"/);
+		await assert.rejects(import("node:fs/promises").then(({ access }) => access(join(cwd, "denied.txt"))), /ENOENT/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("Auto honors explicit suspend:true but otherwise writes without approval", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-auto-suspend-"));
+	let confirmations = 0;
+	try {
+		const result = await createPiProgramTool(() => "auto", fakePi()).execute(
+			"program",
+			{ script: 'await repo.write({ path: "suspended.txt", content: "confirmed" }, { reason: "explicit scrutiny", suspend: true });' },
+			undefined,
+			undefined,
+			interactiveContext(cwd, async (_title, message) => { confirmations++; assert.match(message, /explicit scrutiny/); return true; }),
+		);
+		assert.equal(confirmations, 1);
+		assert.match(result.content[0].text, /Successfully wrote/);
+		assert.equal(await import("node:fs/promises").then(({ readFile }) => readFile(join(cwd, "suspended.txt"), "utf8")), "confirmed");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("Review and Plan modes block writes before confirmation", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-read-only-mode-"));
+	let confirmations = 0;
+	try {
+		for (const mode of ["review", "plan"] as const) {
+			const result = await createPiProgramTool(() => mode, fakePi()).execute(
+				"program",
+				{ script: 'await repo.write({ path: "blocked.txt", content: "blocked" }, { reason: "test restricted mode" });' },
+				undefined,
+				undefined,
+				interactiveContext(cwd, async () => { confirmations++; return true; }),
+			);
+			assert.match(result.content[0].text, /mode is read-only/);
+		}
+		assert.equal(confirmations, 0);
+		await assert.rejects(import("node:fs/promises").then(({ access }) => access(join(cwd, "blocked.txt"))), /ENOENT/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("headless Auto cannot authorize a repository write", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-headless-"));
+	try {
+		const result = await createPiProgramTool(() => "auto", fakePi()).execute(
+			"program",
+			{ script: 'await repo.write({ path: "headless.txt", content: "blocked" }, { reason: "headless test" });' },
+			undefined,
+			undefined,
+			{ cwd, signal: undefined, model: undefined, hasUI: false } as any,
+		);
+		assert.match(result.content[0].text, /disabled without interactive approval UI/);
+		await assert.rejects(import("node:fs/promises").then(({ access }) => access(join(cwd, "headless.txt"))), /ENOENT/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rejects write fan-out, oversized content, and paths outside the repository", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-write-bounds-"));
+	const outside = await mkdtemp(join(tmpdir(), "pi-program-write-outside-"));
+	let confirmations = 0;
+	const tool = createPiProgramTool(() => "auto", fakePi());
+	try {
+		const fanout = await tool.execute("program", {
+			script: 'await Promise.all([{ path: "one.txt", content: "one" }, { path: "two.txt", content: "two" }].map(item => repo.write({ path: item.path, content: item.content }, { reason: "fan out writes" })));',
+		}, undefined, undefined, interactiveContext(cwd, async () => { confirmations++; return true; }));
+		assert.match(fanout.content[0].text, /cannot use each fan-out/);
+		const oversized = await tool.execute("program", {
+			script: `await repo.write(${JSON.stringify({ path: "oversized.txt", content: "x".repeat(32 * 1024 + 1) })}, { reason: "test size bound" });`,
+		}, undefined, undefined, interactiveContext(cwd, async () => { confirmations++; return true; }));
+		assert.match(oversized.content[0].text, /Invalid arguments for repo\.write|content exceeds/);
+		const tooManyEdits = Array.from({ length: 11 }, () => ({ oldText: "old", newText: "new" }));
+		const editLimit = await tool.execute("program", {
+			script: `await repo.edit(${JSON.stringify({ path: "many-edits.txt", edits: tooManyEdits })}, { reason: "test edit count" });`,
+		}, undefined, undefined, interactiveContext(cwd, async () => { confirmations++; return true; }));
+		assert.match(editLimit.content[0].text, /Invalid arguments for repo\.edit/);
+		const missingReason = await tool.execute("program", {
+			script: 'await repo.write({ path: "no-reason.txt", content: "blocked" });',
+		}, undefined, undefined, interactiveContext(cwd, async () => { confirmations++; return true; }));
+		assert.match(missingReason.content[0].text, /requires a non-empty reason/);
+		const escaped = await tool.execute("program", {
+			script: `await repo.write(${JSON.stringify({ path: join(outside, "escaped.txt"), content: "outside" })}, { reason: "test path boundary" });`,
+		}, undefined, undefined, interactiveContext(cwd, async () => { confirmations++; return true; }));
+		assert.match(escaped.content[0].text, /outside the execution repository/);
+		assert.equal(confirmations, 0);
+		await assert.rejects(import("node:fs/promises").then(({ access }) => access(join(cwd, "one.txt"))), /ENOENT/);
+		await assert.rejects(import("node:fs/promises").then(({ access }) => access(join(outside, "escaped.txt"))), /ENOENT/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+		await rm(outside, { recursive: true, force: true });
+	}
+});
+
+test("an abort while an approval prompt is open prevents resume and writing", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-program-abort-approval-"));
+	const controller = new AbortController();
+	try {
+		const tool = createPiProgramTool(() => "manual", fakePi());
+		const pending = tool.execute(
+			"program",
+			{ script: 'await repo.write({ path: "aborted.txt", content: "blocked" }, { reason: "abort test" });' },
+			controller.signal,
+			undefined,
+			interactiveContext(cwd, async () => {
+				controller.abort();
+				return new Promise<boolean>(() => undefined);
+			}),
+		);
+		await assert.rejects(pending, /Operation aborted/);
+		await assert.rejects(import("node:fs/promises").then(({ access }) => access(join(cwd, "aborted.txt"))), /ENOENT/);
+	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
 });

@@ -1,19 +1,21 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** Access classification for host capabilities. Only read classes may cross pi_program. */
-export type CapabilityAccess = "read-only" | "dynamic-read" | "write" | "interactive";
+/** Access classification for host capabilities. Side effects require the explicit approval bridge. */
+export type CapabilityAccess = "read-only" | "dynamic-read" | "side-effect" | "write" | "interactive";
 
 export interface HostCapability {
 	name: string;
 	description: string;
 	access: CapabilityAccess;
-	parameters: Record<string, unknown>;
+	parameters: any;
 	execute(args: unknown, ctx: ExtensionContext, signal?: AbortSignal): Promise<unknown>;
 }
 
 /** Explicit registry of host capabilities permitted inside CallScript. */
+export const PI_PROGRAM_SIDE_EFFECT_CAPABILITY_NAMES = ["repo.edit", "repo.write"] as const;
 export const PI_PROGRAM_CAPABILITY_NAMES = [
 	"repo.read", "repo.find", "repo.grep", "repo.ls", "repo.search",
+	...PI_PROGRAM_SIDE_EFFECT_CAPABILITY_NAMES,
 	"fovea.sketch", "fovea.focus", "fovea.dwell", "fovea.impact",
 	"notes.list", "notes.search", "notes.read", "memory.search", "memory.list",
 	"datadog.search", "datadog.describe", "datadog.call",
@@ -66,7 +68,8 @@ const rejectedNames = new Set<string>(PI_PROGRAM_REJECTED_CAPABILITIES);
 export function isPiProgramCapabilityAllowed(capability: Pick<HostCapability, "name" | "access">): boolean {
 	return allowedNames.has(capability.name)
 		&& !rejectedNames.has(capability.name)
-		&& (capability.access === "read-only" || capability.access === "dynamic-read");
+		&& (capability.access === "read-only" || capability.access === "dynamic-read"
+			|| (capability.access === "side-effect" && (PI_PROGRAM_SIDE_EFFECT_CAPABILITY_NAMES as readonly string[]).includes(capability.name)));
 }
 
 export function assertPiProgramCapabilityAllowed(capability: Pick<HostCapability, "name" | "access">): void {
