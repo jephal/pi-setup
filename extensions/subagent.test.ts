@@ -43,25 +43,26 @@ test("subagent helpers concatenate final assistant text and sanitize bounded out
 	assert.equal(bounded.truncated, true);
 });
 
-test("subagent child tools use the minimal worker default and pass bridge-authorized Datadog names", () => {
-	const configured = childToolNames({ tools: ["read", "subagent", "datadog_query", "write", "read"] } as any);
-	assert.deepEqual(configured, ["read", "write"]);
-	assert.deepEqual(unsupportedChildToolNames({ tools: ["read", "subagent", "datadog_query", "write"] } as any), ["subagent", "datadog_query"]);
+test("subagent child tools include bounded CallScript by default and pass bridge-authorized Datadog names", () => {
+	const configured = childToolNames({ tools: ["read", "subagent", "datadog_query", "write", "read", "pi_program"] } as any);
+	assert.deepEqual(configured, ["read", "write", "pi_program"]);
+	assert.deepEqual(unsupportedChildToolNames({ tools: ["read", "subagent", "datadog_query", "write", "pi_program"] } as any), ["subagent", "datadog_query"]);
 
 	const workerDefaults = childToolNames({} as any);
-	assert.deepEqual(workerDefaults, ["read", "bash", "write", "edit", "find", "grep", "ls"]);
+	assert.deepEqual(workerDefaults, ["read", "bash", "write", "edit", "find", "grep", "ls", "pi_program"]);
 	assert.deepEqual(childProcessToolNames(["read", "datadog_search_tools"], ["datadog_logs", "datadog_logs"]), ["read", "datadog_search_tools", "datadog_logs"]);
 
-	const localToolNames = ["read", "datadog_search_tools"];
+	const localToolNames = ["read", "datadog_search_tools", "pi_program"];
 	const forwardedToolNames = ["datadog_logs", "datadog_error_tracking"];
 	assert.deepEqual(backgroundChildProcessToolNames(localToolNames, forwardedToolNames), [
 		"read",
 		"datadog_search_tools",
+		"pi_program",
 		"datadog_logs",
 		"datadog_error_tracking",
 		"contact_supervisor",
 	]);
-	assert.deepEqual(localToolNames, ["read", "datadog_search_tools"]);
+	assert.deepEqual(localToolNames, ["read", "datadog_search_tools", "pi_program"]);
 	assert.equal(localToolNames.includes("datadog_logs"), false);
 });
 

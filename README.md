@@ -243,7 +243,10 @@ The package intentionally has no standalone TypeScript project configuration: Pi
 The setup includes Pi's first-party subagent workflow with bundled defaults. The
 `datadog-investigator` agent uses the lazy Datadog loader; when it runs as a child,
 Datadog tool metadata and calls are forwarded through a private per-child bridge to
-the parent process.
+the parent process. Child agents also receive the top-level `pi_program` tool by
+default, so they can use CallScript's bounded read capabilities. `repo.edit` and
+`repo.write` remain blocked inside child sessions because they have no approval UI.
+Agents with an explicit `tools:` list must include `pi_program` to use it.
 
 The forwarding bridge is fail-closed, scoped to the Datadog tools exposed by the
 parent's configured MCP endpoint, and does not pass OAuth credentials to child
