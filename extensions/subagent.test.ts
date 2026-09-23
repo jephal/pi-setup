@@ -65,27 +65,29 @@ test("subagent child tools use the minimal worker default and pass bridge-author
 	assert.equal(localToolNames.includes("datadog_logs"), false);
 });
 
-test("subagent child arguments preserve parent high-thinking defaults unless the agent chooses a model", () => {
+test("subagent child arguments select both model and thinking from the effective tier", () => {
 	const parent = { model: { provider: "openai", id: "gpt-5.6" }, thinkingLevel: "high" } as any;
 	assert.deepEqual(buildChildArgs({ model: undefined }, parent), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-5.6", "--thinking", "high"]);
-	assert.deepEqual(buildChildArgs({ model: "openai/gpt-5.6-terra" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-5.6-terra"]);
-	assert.deepEqual(buildChildArgs({ name: "planner", model: "claude-opus-5", modelTier: "medium" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "anthropic/claude-sonnet-5"]);
-	assert.deepEqual(buildChildArgs({ name: "worker", model: "gpt-5.6-terra", modelTier: "medium" }, parent, "complex"), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-5.6-sol"]);
+	assert.deepEqual(buildChildArgs({ model: "openai/gpt-5.6-terra" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-5.6-terra", "--thinking", "high"]);
+	assert.deepEqual(buildChildArgs({ name: "scout", model: "gpt-6-luna", modelTier: "fast", thinkingLevel: "high" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-6-luna", "--thinking", "medium"]);
+	assert.deepEqual(buildChildArgs({ name: "scout", model: "gpt-6-luna", modelTier: "fast", thinkingLevel: "medium" }, parent, "complex"), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-6-luna", "--thinking", "xhigh"]);
+	assert.deepEqual(buildChildArgs({ name: "planner", model: "claude-opus-5.5", modelTier: "medium", thinkingLevel: "medium" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "anthropic/claude-opus-5.5", "--thinking", "low"]);
+	assert.deepEqual(buildChildArgs({ name: "worker", model: "gpt-6-sol", modelTier: "medium", thinkingLevel: "high" }, parent), ["--mode", "json", "-p", "--no-session", "--model", "openai/gpt-6-sol", "--thinking", "medium"]);
 });
 
 test("synchronous metadata and child CLI use the same provider-aware model resolution", () => {
 	const parent = {
-		model: { provider: "github-copilot", id: "gpt-5.6-luna" },
+		model: { provider: "github-copilot", id: "gpt-6-luna" },
 		modelRegistry: {
-			getAvailable: () => [{ provider: "github-copilot", id: "gpt-5.6-sol" }],
+			getAvailable: () => [{ provider: "github-copilot", id: "gpt-6-sol" }],
 		},
 	} as any;
-	const invocation = resolveChildInvocation({ name: "worker", model: undefined, modelTier: "complex" }, parent);
+	const invocation = resolveChildInvocation({ name: "worker", model: undefined, modelTier: "medium" }, parent);
 
-	assert.equal(invocation.resolved.model, "github-copilot/gpt-5.6-sol");
-	assert.equal(invocation.resolved.tier, "complex");
-	assert.deepEqual(invocation.args, ["--mode", "json", "-p", "--no-session", "--model", invocation.resolved.model]);
-	assert.deepEqual(buildChildArgs({ name: "worker", model: undefined, modelTier: "complex" }, parent), invocation.args);
+	assert.equal(invocation.resolved.model, "github-copilot/gpt-6-sol");
+	assert.equal(invocation.resolved.tier, "medium");
+	assert.deepEqual(invocation.args, ["--mode", "json", "-p", "--no-session", "--model", invocation.resolved.model, "--thinking", "medium"]);
+	assert.deepEqual(buildChildArgs({ name: "worker", model: undefined, modelTier: "medium" }, parent), invocation.args);
 });
 
 test("synchronous tier fallback invokes the parent model with inherited thinking", () => {
@@ -94,7 +96,7 @@ test("synchronous tier fallback invokes the parent model with inherited thinking
 		thinkingLevel: "high",
 		modelRegistry: { getAvailable: () => [] },
 	} as any;
-	const invocation = resolveChildInvocation({ name: "worker", model: "custom/provider-model", modelTier: "complex" }, parent);
+	const invocation = resolveChildInvocation({ name: "custom", model: "custom/provider-model", modelTier: "complex" }, parent);
 
 	assert.deepEqual(invocation.resolved, {
 		model: "github-copilot/gpt-5.6-luna",

@@ -3,6 +3,15 @@
 export const MODEL_TIERS = ["fast", "medium", "complex"] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+export function parseThinkingLevel(value: unknown): ThinkingLevel | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.trim().toLowerCase();
+	return THINKING_LEVELS.includes(normalized as ThinkingLevel) ? (normalized as ThinkingLevel) : undefined;
+}
+
 export type ModelResolutionSource = "tier" | "agent" | "parent" | "none";
 export type AvailableModel = { provider: string; id: string };
 
@@ -14,21 +23,44 @@ export interface ResolvedAgentModel {
 
 const DEFAULT_ROUTES: Record<ModelTier, string> = {
 	fast: "openai/gpt-5.6-luna",
-	medium: "openai/gpt-5.6-terra",
+	medium: "openai/gpt-6-sol",
 	complex: "openai/gpt-5.6-sol",
 };
 
 const ROLE_ROUTES: Record<string, Partial<Record<ModelTier, string>>> = {
+	scout: {
+		fast: "openai/gpt-6-luna",
+		medium: "openai/gpt-6-luna",
+		complex: "openai/gpt-6-luna",
+	},
 	planner: {
-		fast: "openai/gpt-5.6-luna",
-		medium: "anthropic/claude-sonnet-5",
-		complex: "anthropic/claude-opus-5",
+		fast: "openai/gpt-6-luna",
+		medium: "anthropic/claude-opus-5.5",
+		complex: "anthropic/claude-opus-5.5",
 	},
 	reviewer: {
-		fast: "openai/gpt-5.6-luna",
-		medium: "anthropic/claude-sonnet-5",
-		complex: "anthropic/claude-opus-5",
+		fast: "openai/gpt-6-luna",
+		medium: "anthropic/claude-opus-5.5",
+		complex: "anthropic/claude-opus-5.5",
 	},
+	worker: {
+		fast: "openai/gpt-6-luna",
+		medium: "openai/gpt-6-sol",
+		complex: "anthropic/claude-opus-5.5",
+	},
+	"datadog-investigator": {
+		fast: "openai/gpt-6-luna",
+		medium: "openai/gpt-6-luna",
+		complex: "openai/gpt-6-luna",
+	},
+};
+
+const ROLE_THINKING_ROUTES: Record<string, Partial<Record<ModelTier, ThinkingLevel>>> = {
+	scout: { fast: "medium", medium: "high", complex: "xhigh" },
+	planner: { fast: "high", medium: "low", complex: "medium" },
+	reviewer: { fast: "high", medium: "low", complex: "medium" },
+	worker: { fast: "high", medium: "medium", complex: "medium" },
+	"datadog-investigator": { fast: "medium", medium: "high", complex: "xhigh" },
 };
 
 export function parseModelTier(value: unknown): ModelTier | undefined {
@@ -39,6 +71,10 @@ export function parseModelTier(value: unknown): ModelTier | undefined {
 
 export function modelRoute(agentName: string, tier: ModelTier): string {
 	return ROLE_ROUTES[agentName]?.[tier] ?? DEFAULT_ROUTES[tier];
+}
+
+export function thinkingRoute(agentName: string, tier: ModelTier): ThinkingLevel | undefined {
+	return ROLE_THINKING_ROUTES[agentName]?.[tier];
 }
 
 /**
@@ -102,7 +138,7 @@ export const MODEL_SELECTION_GUIDANCE = [
 ].join(" ");
 
 export const MODEL_ROUTE_SUMMARY = [
-	"fast: openai/gpt-5.6-luna",
-	"medium: workers openai/gpt-5.6-terra; planners/reviewers anthropic/claude-sonnet-5",
-	"complex: workers openai/gpt-5.6-sol; planners/reviewers anthropic/claude-opus-5",
+	"fast: scout/datadog openai/gpt-6-luna (medium thinking); planner/reviewer/worker openai/gpt-6-luna (high thinking)",
+	"medium: scout/datadog openai/gpt-6-luna (high); planner/reviewer anthropic/claude-opus-5.5 (low); worker openai/gpt-6-sol (medium)",
+	"complex: scout/datadog openai/gpt-6-luna (xhigh); planner/reviewer anthropic/claude-opus-5.5 (medium); worker anthropic/claude-opus-5.5 (medium)",
 ].join("; ");

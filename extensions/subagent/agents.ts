@@ -5,7 +5,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { parseModelTier, type ModelTier } from "./models.ts";
+import { parseModelTier, parseThinkingLevel, type ModelTier, type ThinkingLevel } from "./models.ts";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -15,6 +15,7 @@ export interface AgentConfig {
 	tools?: string[];
 	model?: string;
 	modelTier?: ModelTier;
+	thinkingLevel?: ThinkingLevel;
 	systemPrompt: string;
 	source: "user" | "project";
 	filePath: string;
@@ -68,6 +69,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			tools: tools && tools.length > 0 ? tools : undefined,
 			model: frontmatter.model,
 			modelTier: parseModelTier(frontmatter.modelTier),
+			thinkingLevel: parseThinkingLevel(frontmatter.thinkingLevel),
 			systemPrompt: body,
 			source,
 			filePath,
