@@ -3,8 +3,10 @@ import { promisify } from "node:util";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
+import { createEditableOptionsComponent } from "../src/pi-ui/index.ts";
+import { withHerdrBlock } from "./herdr-blocking.ts";
 import { Type } from "typebox";
-import { checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, taskListWidgetLines } from "./plan-text.ts";
+import { checklistMarkdown, parseChecklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, taskListWidgetLines } from "./plan-text.ts";
 import { clearedPlanBoardSnapshot, projectPlanBoard } from "./plan-board.ts";
 import {
 	clearPlan,
@@ -104,6 +106,15 @@ function updateCheckpointWidget(ctx: ExtensionContext, plan: StoredPlan | undefi
 	ctx.ui.setWidget("plan-checkpoints", taskListWidgetLines(plan.steps), { placement: "aboveEditor" });
 }
 
+function planReviewOptions() {
+	return [
+		{ key: "approve-auto", label: "Approve — start execution in Auto mode", description: "Leave strict Plan mode and continue without per-tool approval prompts.", editable: false },
+		{ key: "approve-edits", label: "Approve — start execution with code-edit approvals", description: "Leave strict Plan mode while keeping bash calls gated.", editable: false },
+		{ key: "edit-task-list", label: "Edit the task list", description: "Change only the numbered task list and review it again.", editable: false },
+		{ key: "keep-planning", label: "Keep planning", description: "Remain read-only in Plan mode and continue the conversation.", editable: false },
+	];
+}
+
 function queuePlanUpdateExplanation(pi: ExtensionAPI, previous: StoredPlan, next: StoredPlan): void {
 	pi.sendMessage({
 		customType: "plan-update-context",
@@ -165,20 +176,68 @@ export default function plans(pi: ExtensionAPI): void {
 				steps,
 				identity: id,
 				updatedAt: new Date().toISOString(),
-				execution: previous?.execution,
+				execution: currentMode === "plan" ? undefined : previous?.execution,
 			};
-			if (currentMode !== "review" && !plan.execution?.active && plan.steps.length > 0) {
+			if (currentMode !== "plan" && currentMode !== "review" && !plan.execution?.active && plan.steps.length > 0) {
 				plan.execution = { active: true, startedAt: new Date().toISOString() };
 			}
-			const filePath = await savePlan(plan);
+			let filePath = await savePlan(plan);
 			emitPlanBoardPlan(pi, ctx, plan);
 			activeExecutionPlan = plan.execution?.active ? plan : undefined;
 			updateCheckpointWidget(ctx, plan);
+			if (currentMode === "plan" && ctx.hasUI) {
+				for (;;) {
+					const review = await withHerdrBlock(pi, "Waiting for task-list review", () => ctx.ui.custom<{ key: string } | null>(
+						(tui, theme, _keybindings, done) => createEditableOptionsComponent(tui, theme, done, {
+							title: `Review task list · ${plan.name}`,
+							options: planReviewOptions(),
+							initialFocus: "options",
+						}),
+					));
+					if (!review) {
+						if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+						return { content: [{ type: "text", text: `Task list saved to ${filePath}. Remain in Plan mode; execution is still gated.` }], details: { plan, cancelled: true, executionReady: false } };
+					}
+					if (review.key === "edit-task-list") {
+						const edited = await withHerdrBlock(pi, "Waiting for task-list edits", () => ctx.ui.editor("Edit numbered task list", checklistMarkdown(plan.name, plan.steps)));
+						if (edited?.trim()) {
+							const editedSteps = parseChecklistMarkdown(edited);
+						if (editedSteps.length) {
+							plan.steps = editedSteps;
+							plan.content = checklistMarkdown(plan.name, editedSteps);
+							plan.updatedAt = new Date().toISOString();
+							filePath = await savePlan(plan);
+							emitPlanBoardPlan(pi, ctx, plan);
+							updateCheckpointWidget(ctx, plan);
+						} else {
+							ctx.ui.notify("Keep at least one numbered task in the list.", "warning");
+						}
+					}
+					continue;
+				}
+					if (review.key === "keep-planning") {
+						if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+						return { content: [{ type: "text", text: `Task list saved to ${filePath}. Stay in Plan mode to continue the discussion.` }], details: { plan, executionReady: false } };
+					}
+					const nextMode = review.key === "approve-auto" ? "auto" : "approve";
+					const modeLabel = nextMode === "auto" ? "Auto mode" : "code-edit approvals";
+					const announcement = `Task list approved. Leaving Plan mode and starting execution with ${modeLabel}.`;
+					plan.execution = plan.steps.length ? { active: true, startedAt: new Date().toISOString() } : undefined;
+					activeExecutionPlan = plan.execution?.active ? plan : undefined;
+					filePath = await savePlan(plan);
+					emitPlanBoardPlan(pi, ctx, plan);
+					updateCheckpointWidget(ctx, plan);
+					ctx.ui.notify(announcement, "info");
+					pi.events.emit("approval-mode:set", { mode: nextMode });
+					if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+					return { content: [{ type: "text", text: `[PLAN MODE EXITED]\n${announcement}\nThe numbered task list is approved. Begin implementation now; do not continue planning.` }], details: { plan, choice: review.key, nextMode, executionReady: true, planModeExited: true } };
+				}
+			}
 			if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-			const executionReady = currentMode !== "review";
+			const executionReady = currentMode !== "review" && currentMode !== "plan";
 			const next = executionReady
 				? "Continue with the numbered task list under the current approval mode."
-				: "Review mode remains read-only; do not execute implementation work.";
+				: currentMode === "review" ? "Review mode remains read-only; do not execute implementation work." : "Remain in read-only Plan mode until the task list is approved.";
 			return { content: [{ type: "text", text: `Saved task list for branch ${id.branch}: ${filePath}. ${next}` }], details: { plan, executionReady } };
 		},
 	});

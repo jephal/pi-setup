@@ -7,12 +7,12 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { PLAN_BOARD_GUIDANCE, PLAN_CONTEXT_GUIDANCE, checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, taskListWidgetLines } from "./plan-text.ts";
+import { PLAN_BOARD_GUIDANCE, PLAN_CONTEXT_GUIDANCE, STRICT_PLAN_MODE_GUIDANCE, checklistMarkdown, parseChecklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, taskListWidgetLines } from "./plan-text.ts";
 import { clearedPlanBoardSnapshot, projectPlanBoard } from "./plan-board.ts";
-import { isReviewModeToolAllowed, isSafeReviewBash, readOnlyToolNames, REVIEW_TOOLS, restoreActiveTools } from "./approval-tools.ts";
+import { isPlanModeToolAllowed, isReviewModeToolAllowed, isSafeReadOnlyBash, readOnlyToolNames, PLAN_TOOLS, REVIEW_TOOLS, restoreActiveTools } from "./approval-tools.ts";
 import { withHerdrBlock } from "./herdr-blocking.ts";
 
-const MODES = ["manual", "approve", "auto", "review"] as const;
+const MODES = ["manual", "approve", "auto", "review", "plan"] as const;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 type ApprovalMode = (typeof MODES)[number];
 type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -22,13 +22,15 @@ const MODE_LABELS: Record<ApprovalMode, string> = {
 	approve: "Approve code edits",
 	auto: "Auto",
 	review: "Review",
+	plan: "Plan",
 };
 
 const HITL_TOOLS = new Set(["ask_questions", "plan"]);
 const PLAN_TOOL_MARKER = "__pi_plan_tool_registered__";
 
 interface PersistedState {
-	mode?: ApprovalMode | "plan";
+	mode?: ApprovalMode;
+	modeBeforePlan?: ApprovalMode;
 }
 
 function isMode(value: unknown): value is ApprovalMode {
@@ -41,14 +43,13 @@ function parseMode(value: string): ApprovalMode | undefined {
 	if (normalized === "approve" || normalized === "approve code edits" || normalized === "edits") return "approve";
 	if (normalized === "auto" || normalized === "automatic") return "auto";
 	if (normalized === "review" || normalized === "reviewing") return "review";
+	if (normalized === "plan" || normalized === "planning") return "plan";
 	return undefined;
 }
 
 function restoreMode(value: unknown): ApprovalMode | undefined {
 	if (isMode(value)) return value;
-	// Older sessions persisted Plan mode as read-only. Restore them as Review
-	// rather than silently granting the default Auto permissions.
-	if (value === "plan" || value === "planning") return "review";
+	if (value === "planning") return "plan";
 	return undefined;
 }
 
@@ -186,6 +187,15 @@ function updateCheckpointWidget(ctx: ExtensionContext, plan: LocalPlan | undefin
 	ctx.ui.setWidget("plan-checkpoints", plan?.steps.length ? taskListWidgetLines(plan.steps) : undefined, { placement: "aboveEditor" });
 }
 
+function planReviewOptions() {
+	return [
+		{ key: "approve-auto", label: "Approve — start execution in Auto mode", description: "Leave strict Plan mode and continue without per-tool approval prompts.", editable: false },
+		{ key: "approve-edits", label: "Approve — start execution with code-edit approvals", description: "Leave strict Plan mode while keeping bash calls gated.", editable: false },
+		{ key: "edit-task-list", label: "Edit task list", description: "Revise the numbered task list and review it again.", editable: false },
+		{ key: "keep-planning", label: "Keep planning", description: "Remain read-only in Plan mode and continue the conversation.", editable: false },
+	];
+}
+
 function queuePlanUpdateExplanation(pi: ExtensionAPI, previous: LocalPlan, next: LocalPlan): void {
 	pi.sendMessage({
 		customType: "plan-update-context",
@@ -222,6 +232,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	let activeExecutionPlan: LocalPlan | undefined;
 	let currentPlanIdentity: LocalPlanIdentity | undefined;
 	const ownsPlanTool = (globalThis as Record<string, unknown>)[PLAN_TOOL_MARKER] !== "plan";
+	let modeBeforePlan: ApprovalMode = "auto";
 	let toolsBeforePlan: string[] | undefined;
 	let temporaryReadOnlyTools: ReadonlySet<string> | undefined;
 	let latestContext: ExtensionContext | undefined;
@@ -273,18 +284,66 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				steps,
 				identity,
 				updatedAt: new Date().toISOString(),
-				execution: previous?.execution,
+				execution: mode === "plan" ? undefined : previous?.execution,
 			};
-			if (mode !== "review" && !plan.execution?.active) plan.execution = { active: true, startedAt: new Date().toISOString() };
-			const filePath = await saveLocalPlan(plan);
+			if (mode !== "review" && mode !== "plan" && !plan.execution?.active) plan.execution = { active: true, startedAt: new Date().toISOString() };
+			let filePath = await saveLocalPlan(plan);
 			emitLocalPlanBoard(pi, ctx, plan);
 			activeExecutionPlan = plan.execution?.active ? plan : undefined;
 			updateCheckpointWidget(ctx, plan);
+			if (mode === "plan" && ctx.hasUI) {
+				for (;;) {
+					const review = await withHerdrBlock(pi, "Waiting for task-list review", () => ctx.ui.custom<{ key: string } | null>(
+						(tui, theme, _keybindings, done) => createEditableOptionsComponent(tui, theme, done, {
+							title: `Review task list · ${plan.name}`,
+							options: planReviewOptions(),
+							initialFocus: "options",
+						}),
+					));
+					if (!review) {
+						if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+						return { content: [{ type: "text", text: `Task list saved to ${filePath}. Remain in Plan mode; execution is still gated.` }], details: { plan, cancelled: true, executionReady: false } };
+					}
+					if (review.key === "edit-task-list") {
+						const edited = await withHerdrBlock(pi, "Waiting for task-list edits", () => ctx.ui.editor("Edit numbered task list", checklistMarkdown(plan.name, plan.steps)));
+						if (edited?.trim()) {
+							const editedSteps = parseChecklistMarkdown(edited);
+						if (editedSteps.length) {
+							plan.steps = editedSteps;
+							plan.content = checklistMarkdown(plan.name, editedSteps);
+							plan.updatedAt = new Date().toISOString();
+							filePath = await saveLocalPlan(plan);
+							emitLocalPlanBoard(pi, ctx, plan);
+							updateCheckpointWidget(ctx, plan);
+						} else {
+							ctx.ui.notify("Keep at least one numbered task in the list.", "warning");
+						}
+					}
+					continue;
+				}
+					if (review.key === "keep-planning") {
+						if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+						return { content: [{ type: "text", text: `Task list saved to ${filePath}. Stay in Plan mode to continue the discussion.` }], details: { plan, executionReady: false } };
+					}
+					const nextMode = review.key === "approve-auto" ? "auto" : "approve";
+					const modeLabel = nextMode === "auto" ? "Auto mode" : "code-edit approvals";
+					const announcement = `Task list approved. Leaving Plan mode and starting execution with ${modeLabel}.`;
+					plan.execution = plan.steps.length ? { active: true, startedAt: new Date().toISOString() } : undefined;
+					activeExecutionPlan = plan.execution?.active ? plan : undefined;
+					filePath = await saveLocalPlan(plan);
+					emitLocalPlanBoard(pi, ctx, plan);
+					updateCheckpointWidget(ctx, plan);
+					ctx.ui.notify(announcement, "info");
+					pi.events.emit("approval-mode:set", { mode: nextMode });
+					if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+					return { content: [{ type: "text", text: `[PLAN MODE EXITED]\n${announcement}\nBegin implementation from the numbered task list.` }], details: { plan, choice: review.key, nextMode, executionReady: true, planModeExited: true } };
+				}
+			}
 			if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-			const executionReady = mode !== "review";
+			const executionReady = mode !== "review" && mode !== "plan";
 			const next = executionReady
 				? "Continue with the numbered task list under the current approval mode."
-				: "Review mode remains read-only; do not execute implementation work.";
+				: mode === "review" ? "Review mode remains read-only; do not execute implementation work." : "Remain in read-only Plan mode until the task list is approved.";
 			return { content: [{ type: "text", text: `Saved task list for branch ${identity.branch}: ${filePath}. ${next}` }], details: { plan, executionReady } };
 		},
 	});
@@ -324,7 +383,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	}
 
 	pi.registerFlag("approval-mode", {
-		description: "Start with an approval mode: manual, approve, auto, or review",
+		description: "Start with an approval mode: manual, approve, auto, review, or plan",
 		type: "string",
 		default: "auto",
 	});
@@ -346,7 +405,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	}
 
 	function persist(): void {
-		pi.appendEntry("approval-mode", { mode } satisfies PersistedState);
+		pi.appendEntry("approval-mode", { mode, modeBeforePlan } satisfies PersistedState);
 	}
 
 	function restoreTools(): void {
@@ -356,7 +415,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	}
 
 	function isReadOnlyMode(value: ApprovalMode): boolean {
-		return value === "review";
+		return value === "review" || value === "plan";
 	}
 
 	function applyToolPolicy(previous: ApprovalMode, next: ApprovalMode): void {
@@ -366,11 +425,24 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			toolsBeforePlan = pi.getActiveTools();
 		}
 		if (isReadOnly) {
-			temporaryReadOnlyTools = REVIEW_TOOLS;
-			pi.setActiveTools(readOnlyToolNames(pi.getAllTools().map((tool) => tool.name)));
+			temporaryReadOnlyTools = new Set([...PLAN_TOOLS, ...REVIEW_TOOLS]);
+			pi.setActiveTools(readOnlyToolNames(next, pi.getAllTools().map((tool) => tool.name)));
 		} else if (wasReadOnly) {
 			restoreTools();
 		}
+	}
+
+	function announcePlanBoundary(previous: ApprovalMode, next: ApprovalMode): void {
+		if (previous !== "plan" && next !== "plan") return;
+		const entering = next === "plan";
+		pi.sendMessage({
+			customType: "approval-mode-transition",
+			content: entering
+				? "[PLAN MODE ENTERED] Strict read-only planning is active. Save only the numbered task list and wait for approval before execution."
+				: `[PLAN MODE EXITED] Planning gate is closed. Follow the existing ${MODE_LABELS[next]} mode permissions.`,
+			display: false,
+			details: { from: previous, to: next, planMode: entering },
+		}, { deliverAs: "nextTurn" });
 	}
 
 	function setMode(next: ApprovalMode, ctx: ExtensionContext, shouldPersist = true): void {
@@ -380,9 +452,11 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		}
 
 		const previous = mode;
+		if (next === "plan") modeBeforePlan = previous;
 		applyToolPolicy(previous, next);
 		mode = next;
 		pi.events.emit("approval-mode:changed", { mode: next });
+		announcePlanBoundary(previous, next);
 		updateUi(ctx);
 		if (shouldPersist) persist();
 	}
@@ -447,7 +521,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			}
 			const next = parseMode(requested);
 			if (!next) {
-				ctx.ui.notify("Usage: /mode manual | approve | auto | review", "warning");
+				ctx.ui.notify("Usage: /mode manual | approve | auto | review | plan", "warning");
 				return;
 			}
 			setMode(next, ctx);
@@ -460,12 +534,15 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		if (HITL_TOOLS.has(event.toolName) || mode === "auto") return;
 
 		if (isReadOnlyMode(mode)) {
-			if (!isReviewModeToolAllowed(event.toolName, event.input)) {
+			const allowed = mode === "plan"
+				? isPlanModeToolAllowed(event.toolName, event.input)
+				: isReviewModeToolAllowed(event.toolName, event.input);
+			if (!allowed) {
 				return { block: true, reason: `${MODE_LABELS[mode]} mode is read-only: this tool is disabled.` };
 			}
 			if (event.toolName === "bash") {
 				const command = typeof event.input.command === "string" ? event.input.command : "";
-				if (!isSafeReviewBash(command)) {
+				if (!isSafeReadOnlyBash(command)) {
 					return { block: true, reason: `${MODE_LABELS[mode]} mode only allows simple read-only bash commands.` };
 				}
 			}
@@ -540,10 +617,12 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			manual: "Every tool call requires user approval, except ask_questions which is already human-in-the-loop. Do not assume a tool call is allowed.",
 			approve: "Read tools, edit, and write may run directly. Every bash call requires user approval. ask_questions is already human-in-the-loop and is not gated twice.",
 			auto: "Tools may run without an approval prompt.",
-			review: "You are in read-only review mode for project files. Do not edit or write project files or perform implementation. You may use the plan tool to save a planning reference, but do not execute it.",
+			review: "You are in read-only review mode for project files. Do not edit or write project files or perform implementation. You may use the plan tool to save a task list, but do not execute it.",
+			plan: "You are in strict read-only Plan mode. Do not modify project files or execute implementation work before the task-list review gate is approved.",
 		};
-		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n${PLAN_CONTEXT_GUIDANCE} If a saved plan returns executionReady, begin implementation under the current mode's permissions.\n`;
-		if (ownsPlanTool && mode !== "review" && activeExecutionPlan?.execution?.active && activeExecutionPlan.steps.length > 0) {
+		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n${PLAN_CONTEXT_GUIDANCE} If a saved task list returns executionReady, begin implementation under the current mode's permissions.\n`;
+		if (mode === "plan") content += `${STRICT_PLAN_MODE_GUIDANCE}\n\n`;
+		if (ownsPlanTool && mode !== "review" && mode !== "plan" && activeExecutionPlan?.execution?.active && activeExecutionPlan.steps.length > 0) {
 			const remaining = activeExecutionPlan.steps.filter((step) => !isCompleted(step));
 			content += `[TASK LIST ACTIVE]\nRemaining tasks:\n${remaining.map((step) => `${step.id}. ${step.title}`).join("\n")}\nAfter completing each individual task, immediately include [DONE:n] in your next response using its task number; then continue with the next task.\n\n`;
 		}
@@ -566,6 +645,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		const flagMode = pi.getFlag("approval-mode");
 		const savedMode = saved?.data?.mode;
 		const requested = restoreMode(flagMode) ?? restoreMode(savedMode) ?? "auto";
+		modeBeforePlan = restoreMode(saved?.data?.modeBeforePlan) ?? "auto";
 		mode = requested;
 		applyToolPolicy("auto", mode);
 		pi.events.emit("approval-mode:changed", { mode });
@@ -581,7 +661,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
-		if (!ownsPlanTool || mode === "review") return;
+		if (!ownsPlanTool || mode === "review" || mode === "plan") return;
 		const plan = activeExecutionPlan;
 		if (!plan?.execution?.active) return;
 		if (!markCompletedCheckpoints(plan, assistantText(event.message))) return;

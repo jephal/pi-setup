@@ -9,7 +9,7 @@ import { Type } from "typebox";
 import { startExcalidrawViewer, type ViewerSession } from "./excalidraw-viewer-server.ts";
 import { createTerminalViewerEndpoint, sendTerminalViewerCommand, spawnLocalTerminalViewer, type TerminalViewerEndpoint } from "./excalidraw-terminal-viewer.ts";
 import { terminalDisplayWidth } from "./excalidraw-terminal-renderer.ts";
-import { classifyVisualizationRequest } from "./visualization-request.ts";
+import { classifyVisualizationRequest, isPreviewVisualizationRequest } from "./visualization-request.ts";
 
 const MAX_MERMAID_CHARS = 8_000;
 const MAX_MERMAID_LINES = 80;
@@ -603,7 +603,7 @@ export default function visualization(pi: ExtensionAPI): void {
 	events?.on?.("approval-mode:changed", (value) => {
 		if (value && typeof value === "object" && "mode" in value && typeof value.mode === "string") {
 			approvalMode = value.mode;
-			viewer?.setWritable(approvalMode !== "review");
+			viewer?.setWritable(approvalMode !== "plan" && approvalMode !== "review");
 		}
 	});
 	const closeViewer = async (): Promise<void> => {
@@ -762,6 +762,9 @@ export default function visualization(pi: ExtensionAPI): void {
 			const request = validateVisualizationRequest(params);
 			const { action, format, title } = request;
 			const terminalAction = requestClass === "terminal-viewer" || action === "terminal_viewer" || request.target === "terminal_viewer" || request.target === "open" || request.target === "update" || request.target === "status" || request.target === "close";
+			if (approvalMode === "plan" && !isPreviewVisualizationRequest(params)) {
+				throw new Error("Plan mode allows only visualize preview; viewer startup, terminal viewer control, and artifact writes require approval.");
+			}
 			if (approvalMode === "review" && (terminalAction || action === "artifact")) throw new Error("Review mode does not allow terminal viewer control or artifact writes.");
 			if (terminalAction && request.target === "close") {
 				const active = terminalViewer;
@@ -846,9 +849,9 @@ export default function visualization(pi: ExtensionAPI): void {
 			if (action === "viewer") {
 				try {
 					if (viewer) await closeViewer();
-					viewer = await startExcalidrawViewer(graph, { writable: approvalMode !== "review" });
+					viewer = await startExcalidrawViewer(graph, { writable: approvalMode !== "plan" && approvalMode !== "review" });
 					// Keep the transition call for mode changes and future startup paths.
-					viewer.setWritable(approvalMode !== "review");
+					viewer.setWritable(approvalMode !== "plan" && approvalMode !== "review");
 					const viewerResult = outputText(`Local Excalidraw viewer ready: ${viewer.url}\n\nOpen this URL in a browser outside Herdr. The server listens on loopback only; terminal wireframe fallback:\n\n\`\`\`text\n${graphWireframe(request.nodes, request.edges)}\n\`\`\``, "visualization output", MAX_OUTPUT_BYTES);
 					return { content: [{ type: "text", text: viewerResult }], details: { action, format, status: "ready", url: viewer.url, host: "127.0.0.1", port: viewer.port, revision: viewer.getScene().revision, nodeCount: request.nodes?.length ?? 0, edgeCount: request.edges?.length ?? 0, elementCount: parsed.elements.length } };
 				} catch (error) {

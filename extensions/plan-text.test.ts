@@ -10,6 +10,8 @@ import {
 	PLAN_TOOL_PROMPT_GUIDELINES,
 	PLAN_TOOL_PROMPT_SNIPPET,
 	PLAN_UPDATE_RESPONSE_GUIDANCE,
+	STRICT_PLAN_MODE_GUIDANCE,
+	parseChecklistMarkdown,
 	taskListWidgetLines,
 	VISUALIZATION_ALL_MODE_GUIDANCE,
 	planUpdateNotice,
@@ -18,8 +20,11 @@ import {
 
 test("plan guidance keeps saved content to a short numbered task list with user-led grilling", () => {
 	assert.match(PLAN_TOOL_DESCRIPTION, /every approval mode/);
-	assert.match(PLAN_TOOL_DESCRIPTION, /short numbered task list shown above the editor/);
+	assert.match(PLAN_TOOL_DESCRIPTION, /short numbered list shown above the editor/);
+	assert.match(PLAN_TOOL_DESCRIPTION, /Plan mode gates the task list before execution/);
 	assert.match(PLAN_TOOL_DESCRIPTION, /Review mode may save tasks but cannot execute/);
+	assert.match(STRICT_PLAN_MODE_GUIDANCE, /strict, read-only workflow/);
+	assert.match(STRICT_PLAN_MODE_GUIDANCE, /review selector before execution/);
 	assert.match(PLAN_DISCUSSION_GUIDANCE, /do not force a research or grilling session/);
 	assert.match(PLAN_DISCUSSION_GUIDANCE, /only when an important unknown blocks/);
 	assert.match(PLAN_DISCUSSION_GUIDANCE, /when the user asks to talk the details through/);
@@ -28,14 +33,16 @@ test("plan guidance keeps saved content to a short numbered task list with user-
 	assert.match(PLAN_FORMAT_GUIDANCE, /Keep discussion in chat/);
 	assert.match(PLAN_FORMAT_GUIDANCE, /add more numbered tasks only when the user asks for detail/);
 	assert.match(PLAN_CONTEXT_GUIDANCE, /Review mode remains read-only/);
-	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /short numbered task list to the above-editor task view in any mode/);
+	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /short numbered task list in any mode/);
+	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /any mode when tracking helps/);
 	assert.match(PLAN_FORMAT_GUIDANCE, /short numbered task list \(1\., 2\., 3\.\)/);
 	assert.match(PLAN_TOOL_PROMPT_GUIDELINES.join(" "), /Review mode remains read-only/);
 	assert.match(PLAN_TOOL_PROMPT_GUIDELINES.join(" "), /pass each task through `steps`/);
 	assert.match(PLAN_UPDATE_RESPONSE_GUIDANCE, /briefly summarize material changes/);
 	assert.match(PLAN_BOARD_GUIDANCE, /authoritative Pi plan/);
 	assert.match(VISUALIZATION_ALL_MODE_GUIDANCE, /No remote or CDN assets/);
-	assert.doesNotMatch(`${PLAN_TOOL_DESCRIPTION} ${PLAN_TOOL_PROMPT_GUIDELINES.join(" ")}`, /Plan mode|PLAN MODE EXITED|review selector/);
+	assert.ok(PLAN_TOOL_PROMPT_GUIDELINES.some((guideline) => /Only in Plan mode, wait for the task-list review selector/.test(guideline)));
+	assert.doesNotMatch(`${PLAN_TOOL_DESCRIPTION} ${PLAN_TOOL_PROMPT_GUIDELINES.join(" ")}`, /full Markdown implementation plan|decision-first writing|## In short|## What happens next/);
 });
 
 test("task widget shows numbered tasks and completion state", () => {
@@ -44,6 +51,13 @@ test("task widget shows numbered tasks and completion state", () => {
 		{ id: 2, title: "Implement", status: "completed" },
 		{ id: 3, title: "Verify", status: "in_progress" },
 	]), ["Task list · 1/3 complete", "☐ 1. Inspect", "☑ 2. Implement", "◐ 3. Verify"]);
+});
+
+test("task-list edits retain only numbered tasks and their completion state", () => {
+	assert.deepEqual(parseChecklistMarkdown("Ignore prose.\n- [ ] 1. Inspect code\n- [x] 2. Update tests"), [
+		{ id: 1, title: "Inspect code", status: "pending" },
+		{ id: 2, title: "Update tests", status: "completed" },
+	]);
 });
 
 test("plan updates summarize changed task lists and checklist steps", () => {
