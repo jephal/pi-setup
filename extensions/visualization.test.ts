@@ -150,15 +150,6 @@ test("viewer action is available in normal execution and its session closes on s
 		body: JSON.stringify({ revision: result.details.revision, scene: buildExcalidrawGraph(graphNodes, graphEdges) }),
 	});
 	assert.equal(reviewWrite.status, 403);
-	handlers.get("approval-mode:changed")?.({ mode: "plan" });
-	const readOnlyWrite = await fetch(new URL("/api/scene", result.details.url), {
-		method: "PUT",
-		headers: { "content-type": "application/json", cookie: page.headers.get("set-cookie")?.split(";", 1)[0] || "" },
-		body: JSON.stringify({ revision: result.details.revision, scene: buildExcalidrawGraph(graphNodes, graphEdges) }),
-	});
-	assert.equal(readOnlyWrite.status, 403);
-	await assert.rejects(tool.execute("viewer-plan", { action: "viewer", format: "excalidraw", nodes: graphNodes }, undefined, undefined, { cwd: process.cwd() }), /Plan mode/);
-	await assert.rejects(tool.execute("artifact-plan", { action: "artifact", format: "excalidraw", nodes: graphNodes, path: "plan.excalidraw" }, undefined, undefined, { cwd: process.cwd() }), /Plan mode/);
 	await handlers.get("session_shutdown")?.();
 	await assert.rejects(fetch(result.details.url));
 });
@@ -233,8 +224,8 @@ test("Review mode allows the browser viewer but keeps it read-only", async () =>
 	await handlers.get("session_shutdown")?.();
 });
 
-test("terminal viewer is blocked in Plan and Review modes", async () => {
-	for (const mode of ["plan", "review"]) {
+test("terminal viewer and artifact writes are blocked in Review mode", async () => {
+	for (const mode of ["review"]) {
 		const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
 		const handlers = new Map<string, (...args: any[]) => any>();
 		const fakePi = {
@@ -244,8 +235,8 @@ test("terminal viewer is blocked in Plan and Review modes", async () => {
 		visualization(fakePi as unknown as ExtensionAPI);
 		const tool = definitions.find((definition) => definition.name === "visualize")!;
 		handlers.get("approval-mode:changed")?.({ mode });
-		await assert.rejects(tool.execute("blocked", { action: "terminal_viewer", target: "open", format: "excalidraw", nodes: graphNodes }, undefined, undefined, { cwd: process.cwd() }), new RegExp(`${mode === "plan" ? "Plan" : "Review"} mode`));
-		if (mode === "review") await assert.rejects(tool.execute("blocked-artifact", { action: "artifact", format: "excalidraw", nodes: graphNodes, path: "blocked.excalidraw" }, undefined, undefined, { cwd: process.cwd() }), /Review mode/);
+		await assert.rejects(tool.execute("blocked", { action: "terminal_viewer", target: "open", format: "excalidraw", nodes: graphNodes }, undefined, undefined, { cwd: process.cwd() }), /Review mode/);
+		await assert.rejects(tool.execute("blocked-artifact", { action: "artifact", format: "excalidraw", nodes: graphNodes, path: "blocked.excalidraw" }, undefined, undefined, { cwd: process.cwd() }), /Review mode/);
 	}
 });
 

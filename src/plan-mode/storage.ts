@@ -25,7 +25,7 @@ export interface PlanExecution {
 
 export interface StoredPlan {
 	name: string;
-	/** Full plans are created in Plan mode; checklists are the small-task fallback outside it. */
+	/** Concise plans are available in every mode; checklists remain useful for small tasks. */
 	kind?: "plan" | "checklist";
 	content: string;
 	steps: PlanStep[];

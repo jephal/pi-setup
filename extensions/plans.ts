@@ -3,8 +3,6 @@ import { promisify } from "node:util";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
-import { OTHER_OPTION_LABEL, createEditableOptionsComponent } from "../src/pi-ui/index.js";
-import { withHerdrBlock } from "./herdr-blocking.ts";
 import { Type } from "typebox";
 import { checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
 import { clearedPlanBoardSnapshot, projectPlanBoard } from "./plan-board.ts";
@@ -51,7 +49,7 @@ function parseSteps(input: unknown): PlanStep[] {
 	if (!Array.isArray(input)) return [];
 	return input.map((step, index) => {
 		const value = step as Record<string, unknown>;
-		return { id: Number(value.id ?? index + 1), title: String(value.title ?? `Phase ${index + 1}`), status: String(value.status ?? "pending") };
+		return { id: Number(value.id ?? index + 1), title: String(value.title ?? `Task ${index + 1}`), status: String(value.status ?? "pending") };
 	});
 }
 
@@ -61,13 +59,13 @@ function isCompleted(step: PlanStep): boolean {
 
 function checkpointMarkdown(content: string, steps: PlanStep[]): string {
 	const markdown = content.trim();
-	if (!steps.length || /^##\s+task checkpoints\s*$/im.test(markdown)) return markdown;
+	if (!steps.length || /^-\s+task checkpoints\s*$/im.test(markdown)) return markdown;
 	const lines = steps.map((step) => {
 		const checkbox = isCompleted(step) ? "x" : " ";
 		const progress = step.status.trim().toLowerCase() === "in_progress" ? " *(in progress)*" : "";
 		return `- [${checkbox}] ${step.id}. ${step.title}${progress}`;
 	});
-	return `${markdown}\n\n## Task checkpoints\n\n${lines.join("\n")}`;
+	return `${markdown}\n\n- Task checkpoints\n${lines.join("\n")}`;
 }
 
 function checkpointWidgetLines(plan: StoredPlan): string[] {
@@ -138,16 +136,7 @@ function queuePlanUpdateExplanation(pi: ExtensionAPI, previous: StoredPlan, next
 	}, { deliverAs: "steer" });
 }
 
-function reviewOptions() {
-	return [
-		{ key: "approve-auto", label: "Approve — start execution in Auto mode", description: "Leave Plan mode and continue without per-tool approval prompts.", editable: false },
-		{ key: "approve-edits", label: "Approve — start execution with code-edit approvals", description: "Leave Plan mode while keeping bash calls gated.", editable: false },
-		{ key: "edit-plan", label: "Edit the plan", description: "Change the plan and review it again.", editable: false },
-		{ key: "feedback", label: OTHER_OPTION_LABEL, description: "Press Enter or Tab to write feedback and continue refining in Plan mode.", isOther: true },
-	];
-}
-
-export default function planMode(pi: ExtensionAPI): void {
+export default function plans(pi: ExtensionAPI): void {
 	const ownsPlanTool = (globalThis as Record<string, unknown>)[PLAN_TOOL_MARKER] !== "approval";
 	pi.events.emit("plan-tool:available", { version: "0.0.1" });
 	pi.events.on("approval-mode:changed", (data) => {
@@ -167,13 +156,11 @@ export default function planMode(pi: ExtensionAPI): void {
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("status"), Type.Literal("clear")]),
 			name: Type.Optional(Type.String()),
-			content: Type.Optional(Type.String()),
+			content: Type.Optional(Type.String({ description: "Bullet-point plan content only: key decisions and actionable tasks, with no prose sections." })),
 			steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.Integer()), title: Type.String(), status: Type.Optional(Type.String()) }))),
 		}),
 		renderCall(params, _theme, _context) {
-			// Keep the plan in the ordinary tool transcript. The review gate below
-			// is the only specialized UI; the plan itself uses Pi's normal Markdown
-			// renderer instead of a persisted custom entry.
+			// Keep the plan in the ordinary tool transcript using Pi's Markdown renderer.
 			const steps = parseSteps(params.steps);
 			const content = params.content?.trim() || (steps.length ? checklistMarkdown(params.name?.trim() || "current-checklist", steps) : "Preparing checklist…");
 			return new Markdown(checkpointMarkdown(content, steps), 1, 0, getMarkdownTheme());
@@ -184,7 +171,7 @@ export default function planMode(pi: ExtensionAPI): void {
 			if (params.action === "status") {
 				const plan = await loadPlan(id);
 				const label = plan?.kind === "checklist" ? "Active checklist" : "Active plan";
-				return { content: [{ type: "text", text: plan ? `${label}: ${plan.name} (${plan.steps.length} ${plan.kind === "checklist" ? "items" : "phases"})` : "No active plan for this branch." }], details: plan ?? {} };
+				return { content: [{ type: "text", text: plan ? `${label}: ${plan.name} (${plan.steps.length} tasks)` : "No active plan for this branch." }], details: plan ?? {} };
 			}
 			if (params.action === "clear") {
 				await clearPlan(id);
@@ -194,10 +181,9 @@ export default function planMode(pi: ExtensionAPI): void {
 				return { content: [{ type: "text", text: `Cleared the active plan for ${id.branch}.` }], details: { cleared: true, branch: id.branch } };
 			}
 			const previous = await loadPlan(id);
-			if (currentMode !== "plan") {
-				if (params.content?.trim()) throw new Error("Outside Plan mode, create/update accepts checklist steps only. Enter Plan mode for a full Markdown plan.");
+			if (!params.content?.trim()) {
 				const steps = parseSteps(params.steps ?? previous?.steps);
-				if (!steps.length) throw new Error("Outside Plan mode, create/update requires at least one checklist step. Enter Plan mode for a full Markdown plan.");
+				if (!steps.length) throw new Error("plan create/update requires concise bullet content or at least one checklist step.");
 				const name = params.name?.trim() || previous?.name || "current-checklist";
 				const plan: StoredPlan = {
 					name,
@@ -208,15 +194,18 @@ export default function planMode(pi: ExtensionAPI): void {
 					updatedAt: new Date().toISOString(),
 					execution: previous?.execution?.active ? previous.execution : undefined,
 				};
+				if (currentMode !== "review" && !plan.execution?.active) plan.execution = { active: true, startedAt: new Date().toISOString() };
 				const filePath = await savePlan(plan);
 				emitPlanBoardPlan(pi, ctx, plan);
-				if (plan.execution?.active) {
-					activeExecutionPlan = plan;
-					updateCheckpointWidget(ctx, plan);
-				}
-				return { content: [{ type: "text", text: `Saved checklist for branch ${id.branch}: ${filePath}` }], details: { plan, checklistOnly: true } };
+				activeExecutionPlan = plan.execution?.active ? plan : undefined;
+				updateCheckpointWidget(ctx, activeExecutionPlan);
+				if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+				const executionReady = currentMode !== "review";
+				const next = executionReady
+					? "Continue with the task list under the current approval mode."
+					: "Review mode remains read-only; do not execute implementation work.";
+				return { content: [{ type: "text", text: `Saved checklist for branch ${id.branch}: ${filePath}. ${next}` }], details: { plan, checklistOnly: true, executionReady } };
 			}
-			if (!params.content?.trim()) throw new Error("plan create/update requires full Markdown content");
 			const plan: StoredPlan = {
 				name: params.name?.trim() || previous?.name || "current-plan",
 				kind: "plan",
@@ -226,56 +215,19 @@ export default function planMode(pi: ExtensionAPI): void {
 				updatedAt: new Date().toISOString(),
 				execution: previous?.execution,
 			};
-			let filePath = await savePlan(plan);
+			if (currentMode !== "review" && !plan.execution?.active && plan.steps.length > 0) {
+				plan.execution = { active: true, startedAt: new Date().toISOString() };
+			}
+			const filePath = await savePlan(plan);
 			emitPlanBoardPlan(pi, ctx, plan);
-			if (plan.execution?.active && currentMode !== "plan") {
-				activeExecutionPlan = plan;
-				updateCheckpointWidget(ctx, plan);
-			}
-			if (ctx.hasUI && currentMode === "plan") {
-				for (;;) {
-					const review = await withHerdrBlock(pi, "Waiting for plan review", () => ctx.ui.custom<{ key: string; edit?: string } | null>(
-						(tui, theme, _keybindings, done) => createEditableOptionsComponent(tui, theme, done, {
-							title: `Review plan · ${plan.name}`,
-							options: reviewOptions(),
-							initialFocus: "options",
-						}),
-					));
-					if (!review) {
-						if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-						return { content: [{ type: "text", text: `Plan saved to ${filePath}. Review cancelled; remaining in Plan mode.` }], details: { plan, cancelled: true } };
-					}
-					if (review.key === "edit-plan") {
-						const edited = await withHerdrBlock(pi, "Waiting for plan edits", () => ctx.ui.editor("Edit plan", plan.content));
-						if (edited?.trim()) {
-							plan.content = edited;
-							plan.updatedAt = new Date().toISOString();
-							filePath = await savePlan(plan);
-							emitPlanBoardPlan(pi, ctx, plan);
-						}
-						continue;
-					}
-					if (review.key === "feedback") {
-						const feedback = review.edit?.trim() ?? "";
-						if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-						return { content: [{ type: "text", text: `Plan saved to ${filePath}. Keep planning with this feedback: ${feedback || "Please refine the plan."}` }], details: { plan, choice: review.key, feedback } };
-					}
-					const nextMode = review.key === "approve-auto" ? "auto" : "approve";
-					const modeLabel = nextMode === "auto" ? "Auto mode" : "code-edit approvals";
-					const announcement = `Plan approved. Leaving Plan mode and starting execution with ${modeLabel}.`;
-					plan.execution = plan.steps.length ? { active: true, startedAt: new Date().toISOString() } : undefined;
-					activeExecutionPlan = plan;
-					filePath = await savePlan(plan);
-					emitPlanBoardPlan(pi, ctx, plan);
-					updateCheckpointWidget(ctx, plan);
-					ctx.ui.notify(announcement, "info");
-					pi.events.emit("approval-mode:set", { mode: nextMode });
-					if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-					return { content: [{ type: "text", text: `[PLAN MODE EXITED]\n${announcement}\nThe plan is approved. Begin the implementation now; do not continue planning.` }], details: { plan, choice: review.key, nextMode, executionReady: true, planModeExited: true } };
-				}
-			}
+			activeExecutionPlan = plan.execution?.active ? plan : undefined;
+			updateCheckpointWidget(ctx, activeExecutionPlan);
 			if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-			return { content: [{ type: "text", text: `Saved plan for branch ${id.branch}: ${filePath}` }], details: { plan } };
+			const executionReady = currentMode !== "review";
+			const next = executionReady
+				? "Continue with the task list under the current approval mode."
+				: "Review mode remains read-only; do not execute implementation work.";
+			return { content: [{ type: "text", text: `Saved plan for branch ${id.branch}: ${filePath}. ${next}` }], details: { plan, executionReady } };
 		},
 	});
 	const boardRequest = async <T extends Record<string, unknown>>(event: string, value: T): Promise<Record<string, unknown>> => {
@@ -337,7 +289,7 @@ export default function planMode(pi: ExtensionAPI): void {
 			emitPlanBoardPlan(pi, ctx, loadedPlan);
 		}
 		const plan = activeExecutionPlan;
-		if (!plan?.execution?.active || plan.steps.length === 0) return;
+		if (currentMode === "review" || !plan?.execution?.active || plan.steps.length === 0) return;
 		const remaining = plan.steps.filter((step) => !isCompleted(step));
 		return {
 			message: {
@@ -349,7 +301,7 @@ export default function planMode(pi: ExtensionAPI): void {
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
-		if (!ownsPlanTool) return;
+		if (!ownsPlanTool || currentMode === "review") return;
 		const plan = activeExecutionPlan;
 		if (!plan?.execution?.active) return;
 		if (!markCompletedCheckpoints(plan, assistantText(event.message))) return;
@@ -380,7 +332,7 @@ export default function planMode(pi: ExtensionAPI): void {
 				return;
 			}
 			const plan = await loadPlan(id);
-			ctx.ui.notify(plan ? `${plan.name} · ${id.branch} · ${plan.steps.length} phases` : `No plan for ${id.branch}.`, "info");
+			ctx.ui.notify(plan ? `${plan.name} · ${id.branch} · ${plan.steps.length} tasks` : `No plan for ${id.branch}.`, "info");
 		},
 	});
 }
