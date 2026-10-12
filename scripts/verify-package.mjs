@@ -7,7 +7,7 @@ if (result.status !== 0) {
 }
 const report = JSON.parse(result.stdout);
 const files = new Set(report[0]?.files?.map((entry) => entry.path) || []);
-for (const required of ["viewer/dist/index.html", "THIRD-PARTY-NOTICES"]) {
+for (const required of ["viewer/dist/index.html", "THIRD-PARTY-NOTICES", "scripts/configure-context-cap.mjs"]) {
   if (!files.has(required)) throw new Error(`npm pack --dry-run omitted ${required}`);
 }
 const bundleFiles = [...files].filter((file) => file.startsWith("viewer/dist/"));

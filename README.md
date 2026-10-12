@@ -39,6 +39,9 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Uses the host's native CodeMode for bounded multi-tool orchestration instead of a custom CallScript layer
   - Uses Pi's native MCP support for configured servers, tool discovery, and permission handling
   - Keeps repository writes, shell/Herdr commands, Notes/Memory mutation, scheduled tasks, and subagents as direct tools with their existing approval policies
+- 500k context cap
+  - Uses Pi's native auto-compaction at 500,000 context tokens for current large-context GitHub Copilot models
+  - Leaves smaller-context models unchanged and preserves unrelated Pi settings
 - Herdr shell integration
   - Gives Pi a `herdr_shell` tool for long-running commands and local servers
   - Gives visualization a dedicated `visualization-viewer` pane role; it never uses a generic shell or Notes pane
@@ -120,6 +123,24 @@ Then reload Pi:
 ```text
 /reload
 ```
+
+## Configure a 500k context cap
+
+Pi normally auto-compacts at `contextWindow - reserveTokens`, which varies by model.
+To compact at 500,000 context tokens for each currently listed large-context GitHub
+Copilot model, run this from a pi-setup checkout:
+
+```bash
+node scripts/configure-context-cap.mjs
+```
+
+The helper updates `~/.pi/agent/models.json` and `~/.pi/agent/settings.json`,
+merging exact per-model overrides while preserving other settings. It caps each
+listed model's effective context window at 516,384 tokens and reserves 16,384
+response tokens, so Pi's native auto-compaction threshold is 500,000. Smaller
+context models are untouched. Use `--dry-run` to preview the target files; restart
+Pi after applying the changes. Add new large-context GitHub Copilot model IDs to
+`scripts/configure-context-cap.mjs` when the catalog changes.
 
 ## Datadog MCP (OAuth)
 

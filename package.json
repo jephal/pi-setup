@@ -26,12 +26,14 @@
     "viewer/package-lock.json",
     "skills",
     "agents",
-    "prompts"
+    "prompts",
+    "scripts/configure-context-cap.mjs"
   ],
   "scripts": {
     "build:viewer": "npm --prefix viewer ci && npm --prefix viewer run build",
     "check:package": "node scripts/verify-package.mjs",
-    "test": "node --experimental-strip-types --test extensions/*.test.ts"
+    "configure:context-cap": "node scripts/configure-context-cap.mjs",
+    "test": "node --experimental-strip-types --test extensions/*.test.ts scripts/*.test.mjs"
   },
   "engines": {
     "node": ">=22.6.0"
