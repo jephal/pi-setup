@@ -650,7 +650,7 @@ export default function visualization(pi: ExtensionAPI): void {
 					active.child?.kill();
 				}
 			} finally {
-				await active.endpoint.cleanup();
+				if (active) await active.endpoint.cleanup();
 				closingTerminalViewer = undefined;
 			}
 		})();

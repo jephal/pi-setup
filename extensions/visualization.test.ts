@@ -201,6 +201,33 @@ test("terminal viewer opens, updates, and closes through its private control soc
 	await handlers.get("session_shutdown")?.();
 });
 
+test("Herdr close during reload is safe when no local terminal viewer exists", async () => {
+	const previousHerdrEnv = process.env.HERDR_ENV;
+	process.env.HERDR_ENV = "1";
+	try {
+		const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+		const emitted: string[] = [];
+		const fakePi = {
+			registerTool(definition: { name: string; execute: (...args: any[]) => Promise<any> }) { definitions.push(definition); },
+			events: {
+				on() {},
+				emit(name: string, value: { respond?: (result: { ok: boolean }) => void }) {
+					emitted.push(name);
+					if (name === "herdr:close-terminal-viewer") value.respond?.({ ok: true });
+				},
+			},
+		};
+		visualization(fakePi as unknown as ExtensionAPI);
+		const tool = definitions.find((definition) => definition.name === "visualize")!;
+		const result = await tool.execute("close-empty-terminal-viewer", { action: "terminal_viewer", target: "close", format: "excalidraw" }, undefined, undefined, { cwd: process.cwd() });
+		assert.equal(result.details.status, "closed");
+		assert.ok(emitted.includes("herdr:close-terminal-viewer"));
+	} finally {
+		if (previousHerdrEnv === undefined) delete process.env.HERDR_ENV;
+		else process.env.HERDR_ENV = previousHerdrEnv;
+	}
+});
+
 test("Review mode allows the browser viewer but keeps it read-only", async () => {
 	const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
 	const handlers = new Map<string, (...args: any[]) => any>();
