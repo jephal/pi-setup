@@ -71,7 +71,7 @@ const BATCH_RESULT_MARKER_RESERVE_BYTES = 512;
 const BATCH_RESULT_MARKER_RESERVE_LINES = 4;
 
 /** Default workers get file/shell tools plus bounded CallScript access for local work. */
-const DEFAULT_CHILD_TOOL_ALLOWLIST = ["read", "bash", "write", "edit", "find", "grep", "ls", "pi_program"] as const;
+const DEFAULT_CHILD_TOOL_ALLOWLIST = ["read", "bash", "write", "edit", "find", "grep", "ls"] as const;
 /** Explicit frontmatter may opt into these additional, still child-safe capabilities. */
 const SAFE_CHILD_TOOL_ALLOWLIST = [
 	...DEFAULT_CHILD_TOOL_ALLOWLIST, "ask_questions", "tool_search",
