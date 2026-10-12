@@ -10,35 +10,46 @@ import {
 	PLAN_TOOL_PROMPT_GUIDELINES,
 	PLAN_TOOL_PROMPT_SNIPPET,
 	PLAN_UPDATE_RESPONSE_GUIDANCE,
+	taskListWidgetLines,
 	VISUALIZATION_ALL_MODE_GUIDANCE,
 	planUpdateNotice,
 	summarizePlanChanges,
 } from "./plan-text.ts";
 
-test("plan guidance uses bullet main points and numbered tasks with user-led grilling", () => {
+test("plan guidance keeps saved content to a short numbered task list with user-led grilling", () => {
 	assert.match(PLAN_TOOL_DESCRIPTION, /every approval mode/);
-	assert.match(PLAN_TOOL_DESCRIPTION, /under the current mode's existing permissions/);
+	assert.match(PLAN_TOOL_DESCRIPTION, /short numbered task list shown above the editor/);
+	assert.match(PLAN_TOOL_DESCRIPTION, /Review mode may save tasks but cannot execute/);
 	assert.match(PLAN_DISCUSSION_GUIDANCE, /do not force a research or grilling session/);
 	assert.match(PLAN_DISCUSSION_GUIDANCE, /only when an important unknown blocks/);
 	assert.match(PLAN_DISCUSSION_GUIDANCE, /when the user asks to talk the details through/);
-	assert.match(PLAN_FORMAT_GUIDANCE, /bullet points for key decisions and main points/);
-	assert.match(PLAN_FORMAT_GUIDANCE, /actionable tasks as a short numbered sequence/);
-	assert.match(PLAN_FORMAT_GUIDANCE, /Add more bullets or numbered steps when the user asks for detail/);
-	assert.match(PLAN_FORMAT_GUIDANCE, /avoid headings and long narrative sections/);
+	assert.match(PLAN_FORMAT_GUIDANCE, /Save only a short numbered task list/);
+	assert.match(PLAN_FORMAT_GUIDANCE, /Do not save decision summaries, rationale, prose sections, or large implementation plans/);
+	assert.match(PLAN_FORMAT_GUIDANCE, /Keep discussion in chat/);
+	assert.match(PLAN_FORMAT_GUIDANCE, /add more numbered tasks only when the user asks for detail/);
 	assert.match(PLAN_CONTEXT_GUIDANCE, /Review mode remains read-only/);
-	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /concise bullets for main points and numbered task steps in any mode/);
-	assert.match(PLAN_FORMAT_GUIDANCE, /short numbered sequence \(1\., 2\., 3\.\)/);
+	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /short numbered task list to the above-editor task view in any mode/);
+	assert.match(PLAN_FORMAT_GUIDANCE, /short numbered task list \(1\., 2\., 3\.\)/);
 	assert.match(PLAN_TOOL_PROMPT_GUIDELINES.join(" "), /Review mode remains read-only/);
+	assert.match(PLAN_TOOL_PROMPT_GUIDELINES.join(" "), /pass each task through `steps`/);
 	assert.match(PLAN_UPDATE_RESPONSE_GUIDANCE, /briefly summarize material changes/);
 	assert.match(PLAN_BOARD_GUIDANCE, /authoritative Pi plan/);
 	assert.match(VISUALIZATION_ALL_MODE_GUIDANCE, /No remote or CDN assets/);
 	assert.doesNotMatch(`${PLAN_TOOL_DESCRIPTION} ${PLAN_TOOL_PROMPT_GUIDELINES.join(" ")}`, /Plan mode|PLAN MODE EXITED|review selector/);
 });
 
-test("plan updates summarize changed bullet content and checklist steps", () => {
+test("task widget shows numbered tasks and completion state", () => {
+	assert.deepEqual(taskListWidgetLines([
+		{ id: 1, title: "Inspect", status: "pending" },
+		{ id: 2, title: "Implement", status: "completed" },
+		{ id: 3, title: "Verify", status: "in_progress" },
+	]), ["Task list · 1/3 complete", "☐ 1. Inspect", "☑ 2. Implement", "◐ 3. Verify"]);
+});
+
+test("plan updates summarize changed task lists and checklist steps", () => {
 	const previous = {
 		name: "initial plan",
-		content: "- Decision: use existing API\n- Inspect implementation",
+		content: "1. Inspect implementation\n2. Implement feature",
 		steps: [
 			{ id: 1, title: "Inspect", status: "pending" },
 			{ id: 2, title: "Implement", status: "pending" },
@@ -46,7 +57,7 @@ test("plan updates summarize changed bullet content and checklist steps", () => 
 	};
 	const next = {
 		name: "revised plan",
-		content: "- Decision: use existing API\n- Inspect implementation\n- Validate behavior",
+		content: "1. Inspect implementation\n2. Implement feature\n3. Validate behavior",
 		steps: [
 			{ id: 1, title: "Inspect", status: "completed" },
 			{ id: 3, title: "Validate", status: "pending" },

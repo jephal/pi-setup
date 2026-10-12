@@ -7,7 +7,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { PLAN_BOARD_GUIDANCE, PLAN_CONTEXT_GUIDANCE, checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
+import { PLAN_BOARD_GUIDANCE, PLAN_CONTEXT_GUIDANCE, checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, taskListWidgetLines } from "./plan-text.ts";
 import { clearedPlanBoardSnapshot, projectPlanBoard } from "./plan-board.ts";
 import { isReviewModeToolAllowed, isSafeReviewBash, readOnlyToolNames, REVIEW_TOOLS, restoreActiveTools } from "./approval-tools.ts";
 import { withHerdrBlock } from "./herdr-blocking.ts";
@@ -146,25 +146,6 @@ function isCompleted(step: LocalPlanStep): boolean {
 	return ["complete", "completed", "done"].includes(step.status.trim().toLowerCase());
 }
 
-function checkpointMarkdown(content: string, steps: LocalPlanStep[]): string {
-	const markdown = content.trim();
-	if (!steps.length || /^-\s+task checkpoints\s*$/im.test(markdown)) return markdown;
-	const lines = steps.map((step) => `- [${isCompleted(step) ? "x" : " "}] ${step.id}. ${step.title}`);
-	return `${markdown}\n\n- Task checkpoints\n${lines.join("\n")}`;
-}
-
-function checkpointWidgetLines(plan: LocalPlan): string[] {
-	const completed = plan.steps.filter(isCompleted).length;
-	return [
-		`Task checkpoints · ${completed}/${plan.steps.length}`,
-		...plan.steps.map((step) => {
-			const status = step.status.trim().toLowerCase();
-			const marker = isCompleted(step) ? "☑" : status === "in_progress" ? "◐" : "☐";
-			return `${marker} ${step.id}. ${step.title}`;
-		}),
-	];
-}
-
 function assistantText(message: unknown): string {
 	if (!message || typeof message !== "object") return "";
 	const value = message as { role?: unknown; content?: unknown };
@@ -202,7 +183,7 @@ function emitLocalPlanBoard(pi: ExtensionAPI, ctx: ExtensionContext, plan: Local
 
 function updateCheckpointWidget(ctx: ExtensionContext, plan: LocalPlan | undefined): void {
 	if (!ctx.hasUI) return;
-	ctx.ui.setWidget("plan-checkpoints", plan?.execution?.active && plan.steps.length ? checkpointWidgetLines(plan) : undefined, { placement: "aboveEditor" });
+	ctx.ui.setWidget("plan-checkpoints", plan?.steps.length ? taskListWidgetLines(plan.steps) : undefined, { placement: "aboveEditor" });
 }
 
 function queuePlanUpdateExplanation(pi: ExtensionAPI, previous: LocalPlan, next: LocalPlan): void {
@@ -261,14 +242,11 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("status"), Type.Literal("clear")]),
 			name: Type.Optional(Type.String()),
-			content: Type.Optional(Type.String({ description: "Concise bullet points for key decisions and main points, plus a short numbered list of actionable task steps; no long prose sections." })),
-			steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.Integer()), title: Type.String(), status: Type.Optional(Type.String()) }))),
+			steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.Integer()), title: Type.String({ description: "Short numbered task text for the above-editor list" }), status: Type.Optional(Type.String()) }))),
 		}),
 		renderCall(params, _theme, _context) {
-			// Keep the saved bullet plan in the ordinary transcript with Pi's renderer.
 			const steps = (params.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" }));
-			const content = params.content?.trim() || (steps.length ? checklistMarkdown(params.name?.trim() || "current-checklist", steps) : "Preparing checklist…");
-			return new Markdown(checkpointMarkdown(content, steps), 1, 0, getMarkdownTheme());
+			return new Markdown(steps.length ? checklistMarkdown(params.name?.trim() || "current-task-list", steps) : "Preparing task list…", 1, 0, getMarkdownTheme());
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const identity = await planIdentity(pi, ctx);
@@ -281,57 +259,33 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			}
 			if (params.action === "status") {
 				const plan = await loadLocalPlan(identity);
-				const label = plan?.kind === "checklist" ? "Active checklist" : "Active plan";
-				return { content: [{ type: "text", text: plan ? `${label} for ${identity.branch}:\n${plan.content}` : `No active plan for ${identity.branch}.` }], details: plan ? { identity, plan } : { identity } };
+				const tasks = plan?.steps.length ? checklistMarkdown(plan.name, plan.steps) : "- No task steps saved";
+				return { content: [{ type: "text", text: plan ? `Task list · ${plan.name}\n${tasks}` : `No task list for ${identity.branch}.` }], details: plan ? { identity, plan } : { identity } };
 			}
 			const previous = await loadLocalPlan(identity);
-			if (!params.content?.trim()) {
-				const steps = (params.steps ?? previous?.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" }));
-				if (!steps.length) throw new Error("plan create/update requires concise bullet content or at least one checklist step.");
-				const name = params.name?.trim() || previous?.name || "current-checklist";
-				const plan: LocalPlan = {
-					name,
-					kind: previous?.execution?.active ? (previous.kind ?? "plan") : "checklist",
-					content: previous?.execution?.active ? previous.content : checklistMarkdown(name, steps),
-					steps,
-					identity,
-					updatedAt: new Date().toISOString(),
-					execution: previous?.execution?.active ? previous.execution : undefined,
-				};
-				if (mode !== "review" && !plan.execution?.active) plan.execution = { active: true, startedAt: new Date().toISOString() };
-				const filePath = await saveLocalPlan(plan);
-				emitLocalPlanBoard(pi, ctx, plan);
-				activeExecutionPlan = plan.execution?.active ? plan : undefined;
-				updateCheckpointWidget(ctx, activeExecutionPlan);
-				if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-				const executionReady = mode !== "review";
-				const next = executionReady
-					? "Continue with the task list under the current approval mode."
-					: "Review mode remains read-only; do not execute implementation work.";
-				return { content: [{ type: "text", text: `Saved checklist for branch ${identity.branch}: ${filePath}. ${next}` }], details: { plan, checklistOnly: true, executionReady } };
-			}
-			let plan: LocalPlan = {
-				name: params.name?.trim() || previous?.name || "current-plan",
-				kind: "plan",
-				content: params.content,
-				steps: (params.steps ?? previous?.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" })),
+			const steps = (params.steps ?? previous?.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" }));
+			if (!steps.length) throw new Error("plan create/update requires at least one numbered task step.");
+			const name = params.name?.trim() || previous?.name || "current-task-list";
+			const plan: LocalPlan = {
+				name,
+				kind: "checklist",
+				content: checklistMarkdown(name, steps),
+				steps,
 				identity,
 				updatedAt: new Date().toISOString(),
 				execution: previous?.execution,
 			};
-			if (mode !== "review" && !plan.execution?.active && plan.steps.length > 0) {
-				plan.execution = { active: true, startedAt: new Date().toISOString() };
-			}
+			if (mode !== "review" && !plan.execution?.active) plan.execution = { active: true, startedAt: new Date().toISOString() };
 			const filePath = await saveLocalPlan(plan);
 			emitLocalPlanBoard(pi, ctx, plan);
 			activeExecutionPlan = plan.execution?.active ? plan : undefined;
-			updateCheckpointWidget(ctx, activeExecutionPlan);
+			updateCheckpointWidget(ctx, plan);
 			if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
 			const executionReady = mode !== "review";
 			const next = executionReady
-				? "Continue with the task list under the current approval mode."
+				? "Continue with the numbered task list under the current approval mode."
 				: "Review mode remains read-only; do not execute implementation work.";
-			return { content: [{ type: "text", text: `Saved plan to ${filePath}. ${next}` }], details: { plan, executionReady } };
+			return { content: [{ type: "text", text: `Saved task list for branch ${identity.branch}: ${filePath}. ${next}` }], details: { plan, executionReady } };
 		},
 	});
 	const boardRequest = async <T extends Record<string, unknown>>(event: string, value: T): Promise<Record<string, unknown>> => {
@@ -576,7 +530,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				currentPlanIdentity = nextIdentity;
 				const loadedPlan = await loadLocalPlan(nextIdentity);
 				activeExecutionPlan = loadedPlan?.execution?.active ? loadedPlan : undefined;
-				updateCheckpointWidget(ctx, activeExecutionPlan);
+				updateCheckpointWidget(ctx, loadedPlan);
 				// Branch/worktree changes replace the board even when the new scope
 				// has only a draft or no plan.
 				emitLocalPlanBoard(pi, ctx, loadedPlan);
@@ -591,7 +545,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n${PLAN_CONTEXT_GUIDANCE} If a saved plan returns executionReady, begin implementation under the current mode's permissions.\n`;
 		if (ownsPlanTool && mode !== "review" && activeExecutionPlan?.execution?.active && activeExecutionPlan.steps.length > 0) {
 			const remaining = activeExecutionPlan.steps.filter((step) => !isCompleted(step));
-			content += `[PLAN CHECKPOINTS ACTIVE]\nRemaining checkpoints:\n${remaining.map((step) => `${step.id}. ${step.title}`).join("\n")}\nAfter completing each individual checkpoint, immediately include [DONE:n] in your next response using its step id; do not wait until all checkpoints are complete. Then continue with the next remaining checkpoint.\n\n`;
+			content += `[TASK LIST ACTIVE]\nRemaining tasks:\n${remaining.map((step) => `${step.id}. ${step.title}`).join("\n")}\nAfter completing each individual task, immediately include [DONE:n] in your next response using its task number; then continue with the next task.\n\n`;
 		}
 		return {
 			message: {
@@ -621,7 +575,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		currentPlanIdentity = identity;
 		const loadedPlan = await loadLocalPlan(identity);
 		activeExecutionPlan = loadedPlan?.execution?.active ? loadedPlan : undefined;
-		updateCheckpointWidget(ctx, activeExecutionPlan);
+		updateCheckpointWidget(ctx, loadedPlan);
 		// Reconcile every loaded state so a reload cannot display a prior branch.
 		emitLocalPlanBoard(pi, ctx, loadedPlan);
 	});
@@ -637,8 +591,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			await saveLocalPlan(plan);
 			emitLocalPlanBoard(pi, ctx, plan);
 			activeExecutionPlan = undefined;
-			updateCheckpointWidget(ctx, undefined);
-			ctx.ui.notify(`All task checkpoints complete for ${plan.name}.`, "info");
+			updateCheckpointWidget(ctx, plan);
+			ctx.ui.notify(`All tasks complete for ${plan.name}.`, "info");
 			return;
 		}
 		await saveLocalPlan(plan);

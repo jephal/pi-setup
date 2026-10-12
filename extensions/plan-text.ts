@@ -3,7 +3,7 @@ export const PLAN_DISCUSSION_GUIDANCE =
 	"Planning is available in every approval mode. Inspect repository code or documentation when useful, but do not force a research or grilling session for ordinary tasks. Make reasonable assumptions and ask focused questions only when an important unknown blocks useful or safe progress, or when the user asks to talk the details through. If the user wants a grilling session, continue the conversation until aligned before saving the plan.";
 
 export const PLAN_FORMAT_GUIDANCE =
-	"Use concise bullet points for key decisions and main points. Present actionable tasks as a short numbered sequence (1., 2., 3.), with useful file or documentation anchors when they help. Add more bullets or numbered steps when the user asks for detail; avoid headings and long narrative sections.";
+	"Save only a short numbered task list (1., 2., 3.) with concise task names and useful file or documentation anchors when they help. Do not save decision summaries, rationale, prose sections, or large implementation plans. Keep discussion in chat; add more numbered tasks only when the user asks for detail.";
 
 export const PLAN_CONTEXT_GUIDANCE =
 	`${PLAN_DISCUSSION_GUIDANCE} ${PLAN_FORMAT_GUIDANCE} Review mode remains read-only: a saved plan does not authorize implementation or code changes.`;
@@ -18,10 +18,10 @@ export const PLAN_BOARD_GUIDANCE =
 	"The Plan Board is a derived display of the authoritative Pi plan. Open it explicitly with plan_board action open; use update, status, or close for its fixed display lifecycle. It renders a bounded Markdown projection with shared Pi styling, preserves Mermaid preprocessing and Excalidraw scenes, and falls back to plain lines safely. Never use herdr_shell, Notes, or arbitrary commands for the board. In Review mode, board use remains read-only; approval and HITL decisions remain in Pi.";
 
 export const PLAN_TOOL_DESCRIPTION =
-	`Planning tool available in every approval mode. Create or refine a concise plan, then continue under the current mode's existing permissions. Inspect or clear the current branch plan in any mode. ${PLAN_CONTEXT_GUIDANCE} ${VISUALIZATION_ALL_MODE_GUIDANCE} ${PLAN_BOARD_GUIDANCE}`;
+	`Task-list tool available in every approval mode. Create or update the short numbered task list shown above the editor; do not save long-form plans. Review mode may save tasks but cannot execute them. Inspect or clear the current branch list in any mode. ${PLAN_CONTEXT_GUIDANCE} ${VISUALIZATION_ALL_MODE_GUIDANCE} ${PLAN_BOARD_GUIDANCE}`;
 
 export const PLAN_TOOL_PROMPT_SNIPPET =
-	"Use concise bullets for main points and numbered task steps in any mode; ask questions only when needed or requested";
+	"Save a short numbered task list to the above-editor task view in any mode; discuss decisions and optional grilling in chat";
 
 export const PLAN_TOOL_PROMPT_GUIDELINES = [
 	PLAN_DISCUSSION_GUIDANCE,
@@ -30,7 +30,7 @@ export const PLAN_TOOL_PROMPT_GUIDELINES = [
 	PLAN_UPDATE_RESPONSE_GUIDANCE,
 	PLAN_BOARD_GUIDANCE,
 	"Review mode remains read-only: a saved plan does not authorize implementation or code changes.",
-	"For small tasks, a compact checklist is fine. Add useful task steps when checkpoint tracking helps; a concise bullet list alone is enough otherwise.",
+	"Create/update saves only numbered task steps in the above-editor list; pass each task through `steps` so it appears in the view. Keep explanations and design discussion in chat.",
 	"Use status to inspect the active branch plan and clear when work is complete or abandoned.",
 	"During execution, report each completed checkpoint as [DONE:n] before continuing.",
 ];
@@ -39,6 +39,19 @@ export interface ChecklistStep {
 	id: number;
 	title: string;
 	status: string;
+}
+
+export function taskListWidgetLines(steps: readonly ChecklistStep[]): string[] {
+	const isCompleted = (status: string) => ["complete", "completed", "done"].includes(status.trim().toLowerCase());
+	const completed = steps.filter((step) => isCompleted(step.status)).length;
+	return [
+		`Task list · ${completed}/${steps.length} complete`,
+		...steps.map((step) => {
+			const status = step.status.trim().toLowerCase();
+			const marker = isCompleted(status) ? "☑" : status === "in_progress" ? "◐" : "☐";
+			return `${marker} ${step.id}. ${step.title}`;
+		}),
+	];
 }
 
 export function checklistMarkdown(_name: string, steps: readonly ChecklistStep[]): string {

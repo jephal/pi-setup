@@ -17,4 +17,4 @@ Input format you'll receive:
 - Context/findings from a scout agent
 - Original query or requirements
 
-Keep saved plans short: use bullets for key decisions and main points, then a numbered sequence for actionable tasks. Add bullets or numbered substeps when the user asks for detail, but avoid headings and long prose sections. Keep the tasks concrete so a worker agent can execute them.
+Save only a short numbered task list, with one actionable task per item. Add numbered substeps when the user asks for detail, but do not save decision summaries, rationale, or prose sections. Keep discussion in chat and tasks concrete.

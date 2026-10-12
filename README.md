@@ -53,7 +53,7 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Restricts the hosted endpoint to the read-only `core`, `error-tracking`, and `rum` toolsets
 - Planning and Plan Board
   - Branch/session-scoped plan storage and a `plan` tool available in every approval mode
-  - Saved plans use concise bullets for main points and numbered steps for tasks; users can request more detail or talk through questions before saving
+  - Saved plans contain only concise numbered task lists shown above the editor; users can discuss details in chat before saving
   - Markdown task checkpoints and above-editor execution progress
   - Dedicated derived `plan-board` Herdr pane with explicit `plan_board` display actions
   - Bounded Markdown/checkpoint projection rendered with Pi's shared Markdown component, with safe plain-line fallback, Mermaid Unicode preprocessing, and optional Excalidraw ANSI scenes

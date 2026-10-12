@@ -4,7 +4,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
+import { checklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, taskListWidgetLines } from "./plan-text.ts";
 import { clearedPlanBoardSnapshot, projectPlanBoard } from "./plan-board.ts";
 import {
 	clearPlan,
@@ -57,29 +57,6 @@ function isCompleted(step: PlanStep): boolean {
 	return ["complete", "completed", "done"].includes(step.status.trim().toLowerCase());
 }
 
-function checkpointMarkdown(content: string, steps: PlanStep[]): string {
-	const markdown = content.trim();
-	if (!steps.length || /^-\s+task checkpoints\s*$/im.test(markdown)) return markdown;
-	const lines = steps.map((step) => {
-		const checkbox = isCompleted(step) ? "x" : " ";
-		const progress = step.status.trim().toLowerCase() === "in_progress" ? " *(in progress)*" : "";
-		return `- [${checkbox}] ${step.id}. ${step.title}${progress}`;
-	});
-	return `${markdown}\n\n- Task checkpoints\n${lines.join("\n")}`;
-}
-
-function checkpointWidgetLines(plan: StoredPlan): string[] {
-	const completed = plan.steps.filter(isCompleted).length;
-	return [
-		`Task checkpoints · ${completed}/${plan.steps.length}`,
-		...plan.steps.map((step) => {
-			const status = step.status.trim().toLowerCase();
-			const marker = isCompleted(step) ? "☑" : status === "in_progress" ? "◐" : "☐";
-			return `${marker} ${step.id}. ${step.title}`;
-		}),
-	];
-}
-
 function assistantText(message: unknown): string {
 	if (!message || typeof message !== "object") return "";
 	const value = message as { role?: unknown; content?: unknown };
@@ -120,11 +97,11 @@ function emitPlanBoardPlan(pi: ExtensionAPI, ctx: ExtensionContext, plan: Stored
 
 function updateCheckpointWidget(ctx: ExtensionContext, plan: StoredPlan | undefined): void {
 	if (!ctx.hasUI) return;
-	if (!plan?.execution?.active || plan.steps.length === 0) {
+	if (!plan || plan.steps.length === 0) {
 		ctx.ui.setWidget("plan-checkpoints", undefined);
 		return;
 	}
-	ctx.ui.setWidget("plan-checkpoints", checkpointWidgetLines(plan), { placement: "aboveEditor" });
+	ctx.ui.setWidget("plan-checkpoints", taskListWidgetLines(plan.steps), { placement: "aboveEditor" });
 }
 
 function queuePlanUpdateExplanation(pi: ExtensionAPI, previous: StoredPlan, next: StoredPlan): void {
@@ -156,22 +133,19 @@ export default function plans(pi: ExtensionAPI): void {
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("status"), Type.Literal("clear")]),
 			name: Type.Optional(Type.String()),
-			content: Type.Optional(Type.String({ description: "Concise bullet points for key decisions and main points, plus a short numbered list of actionable task steps; no long prose sections." })),
-			steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.Integer()), title: Type.String(), status: Type.Optional(Type.String()) }))),
+			steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.Integer()), title: Type.String({ description: "Short numbered task text to show in the above-editor task list" }), status: Type.Optional(Type.String()) }))),
 		}),
 		renderCall(params, _theme, _context) {
-			// Keep the plan in the ordinary tool transcript using Pi's Markdown renderer.
 			const steps = parseSteps(params.steps);
-			const content = params.content?.trim() || (steps.length ? checklistMarkdown(params.name?.trim() || "current-checklist", steps) : "Preparing checklist…");
-			return new Markdown(checkpointMarkdown(content, steps), 1, 0, getMarkdownTheme());
+			return new Markdown(steps.length ? checklistMarkdown(params.name?.trim() || "current-task-list", steps) : "Preparing task list…", 1, 0, getMarkdownTheme());
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const id = await sessionIdentity(ctx);
 			currentIdentity = id;
 			if (params.action === "status") {
 				const plan = await loadPlan(id);
-				const label = plan?.kind === "checklist" ? "Active checklist" : "Active plan";
-				return { content: [{ type: "text", text: plan ? `${label}: ${plan.name} (${plan.steps.length} tasks)` : "No active plan for this branch." }], details: plan ?? {} };
+				const tasks = plan?.steps.length ? checklistMarkdown(plan.name, plan.steps) : "- No task steps saved";
+				return { content: [{ type: "text", text: plan ? `Task list · ${plan.name}\n${tasks}` : "No task list for this branch." }], details: plan ?? {} };
 			}
 			if (params.action === "clear") {
 				await clearPlan(id);
@@ -181,36 +155,14 @@ export default function plans(pi: ExtensionAPI): void {
 				return { content: [{ type: "text", text: `Cleared the active plan for ${id.branch}.` }], details: { cleared: true, branch: id.branch } };
 			}
 			const previous = await loadPlan(id);
-			if (!params.content?.trim()) {
-				const steps = parseSteps(params.steps ?? previous?.steps);
-				if (!steps.length) throw new Error("plan create/update requires concise bullet content or at least one checklist step.");
-				const name = params.name?.trim() || previous?.name || "current-checklist";
-				const plan: StoredPlan = {
-					name,
-					kind: previous?.execution?.active ? (previous.kind ?? "plan") : "checklist",
-					content: previous?.execution?.active ? previous.content : checklistMarkdown(name, steps),
-					steps,
-					identity: id,
-					updatedAt: new Date().toISOString(),
-					execution: previous?.execution?.active ? previous.execution : undefined,
-				};
-				if (currentMode !== "review" && !plan.execution?.active) plan.execution = { active: true, startedAt: new Date().toISOString() };
-				const filePath = await savePlan(plan);
-				emitPlanBoardPlan(pi, ctx, plan);
-				activeExecutionPlan = plan.execution?.active ? plan : undefined;
-				updateCheckpointWidget(ctx, activeExecutionPlan);
-				if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-				const executionReady = currentMode !== "review";
-				const next = executionReady
-					? "Continue with the task list under the current approval mode."
-					: "Review mode remains read-only; do not execute implementation work.";
-				return { content: [{ type: "text", text: `Saved checklist for branch ${id.branch}: ${filePath}. ${next}` }], details: { plan, checklistOnly: true, executionReady } };
-			}
+			const steps = parseSteps(params.steps ?? previous?.steps);
+			if (!steps.length) throw new Error("plan create/update requires at least one numbered task step.");
+			const name = params.name?.trim() || previous?.name || "current-task-list";
 			const plan: StoredPlan = {
-				name: params.name?.trim() || previous?.name || "current-plan",
-				kind: "plan",
-				content: params.content,
-				steps: parseSteps(params.steps ?? previous?.steps),
+				name,
+				kind: "checklist",
+				content: checklistMarkdown(name, steps),
+				steps,
 				identity: id,
 				updatedAt: new Date().toISOString(),
 				execution: previous?.execution,
@@ -221,13 +173,13 @@ export default function plans(pi: ExtensionAPI): void {
 			const filePath = await savePlan(plan);
 			emitPlanBoardPlan(pi, ctx, plan);
 			activeExecutionPlan = plan.execution?.active ? plan : undefined;
-			updateCheckpointWidget(ctx, activeExecutionPlan);
+			updateCheckpointWidget(ctx, plan);
 			if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
 			const executionReady = currentMode !== "review";
 			const next = executionReady
-				? "Continue with the task list under the current approval mode."
+				? "Continue with the numbered task list under the current approval mode."
 				: "Review mode remains read-only; do not execute implementation work.";
-			return { content: [{ type: "text", text: `Saved plan for branch ${id.branch}: ${filePath}. ${next}` }], details: { plan, executionReady } };
+			return { content: [{ type: "text", text: `Saved task list for branch ${id.branch}: ${filePath}. ${next}` }], details: { plan, executionReady } };
 		},
 	});
 	const boardRequest = async <T extends Record<string, unknown>>(event: string, value: T): Promise<Record<string, unknown>> => {
@@ -271,7 +223,7 @@ export default function plans(pi: ExtensionAPI): void {
 		currentIdentity = await sessionIdentity(ctx);
 		const loadedPlan = await loadPlan(currentIdentity);
 		activeExecutionPlan = loadedPlan?.execution?.active ? loadedPlan : undefined;
-		updateCheckpointWidget(ctx, activeExecutionPlan);
+		updateCheckpointWidget(ctx, loadedPlan);
 		// Always reconcile the derived board, including draft, completed, and
 		// cleared states. A reload must not leave the prior branch on screen.
 		emitPlanBoardPlan(pi, ctx, loadedPlan);
@@ -284,7 +236,7 @@ export default function plans(pi: ExtensionAPI): void {
 			currentIdentity = nextIdentity;
 			const loadedPlan = await loadPlan(nextIdentity);
 			activeExecutionPlan = loadedPlan?.execution?.active ? loadedPlan : undefined;
-			updateCheckpointWidget(ctx, activeExecutionPlan);
+			updateCheckpointWidget(ctx, loadedPlan);
 			// Scope changes must replace or clear the old board even for drafts.
 			emitPlanBoardPlan(pi, ctx, loadedPlan);
 		}
@@ -294,7 +246,7 @@ export default function plans(pi: ExtensionAPI): void {
 		return {
 			message: {
 				customType: "plan-checkpoints-context",
-				content: `[PLAN CHECKPOINTS ACTIVE]\nRemaining checkpoints:\n${remaining.map((step) => `${step.id}. ${step.title}`).join("\n")}\nAfter completing each individual checkpoint, immediately include [DONE:n] in your next response using its step id; do not wait until all checkpoints are complete. Then continue with the next remaining checkpoint.`,
+				content: `[TASK LIST ACTIVE]\nRemaining tasks:\n${remaining.map((step) => `${step.id}. ${step.title}`).join("\n")}\nAfter completing each individual task, immediately include [DONE:n] in your next response using its task number; then continue with the next task.`,
 				display: false,
 			},
 		};
@@ -311,8 +263,8 @@ export default function plans(pi: ExtensionAPI): void {
 			await savePlan(plan);
 			emitPlanBoardPlan(pi, ctx, plan);
 			activeExecutionPlan = undefined;
-			updateCheckpointWidget(ctx, undefined);
-			ctx.ui.notify(`All task checkpoints complete for ${plan.name}.`, "info");
+			updateCheckpointWidget(ctx, plan);
+			ctx.ui.notify(`All tasks complete for ${plan.name}.`, "info");
 			return;
 		}
 		await savePlan(plan);
