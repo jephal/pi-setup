@@ -2,7 +2,7 @@
 import { isDatadogReadOnlyToolName } from "./datadog-mcp.ts";
 import { classifyVisualizationRequest, isPreviewVisualizationRequest } from "./visualization-request.ts";
 
-export const REVIEW_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "ask_questions", "plan", "repo_search", "plan_board", "visualize"]);
+export const REVIEW_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "ask_questions", "plan", "repo_search", "plan_board", "visualize", "tool_search"]);
 
 // Read-only shell commands allowed by Plan and Review modes.
 const SAFE_BASH = [
@@ -46,7 +46,7 @@ export const PLAN_TOOLS = new Set([
 	// Scheduled-task listing is observational; create/delete/run remain gated.
 	"scheduled_task_list",
 	"fovea_sketch", "fovea_focus", "fovea_dwell", "fovea_impact",
-	"datadog_search_tools",
+	"tool_search",
 	"plan_board",
 	PLAN_VISUALIZATION_TOOL,
 ]);

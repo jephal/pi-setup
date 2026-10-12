@@ -37,7 +37,6 @@
     "node": ">=22.6.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
     "grok-mermaid": "^0.2.2",
     "pi-fovea": "git+https://github.com/jephal/pi-fovea.git#v0.18.5-agent-safe.2"
   },

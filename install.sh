@@ -87,6 +87,5 @@ if command -v nvim >/dev/null 2>&1; then
 else
   printf '  Neovim:                optional; install it to use the notes viewer\n'
 fi
-printf '\nOptional Datadog setup:\n'
-printf '  curl -sSL https://coterm.datadoghq.com/mcp-cli/install.sh | bash\n'
-printf '  ~/.local/bin/datadog_mcp_cli --site us3 login\n'
+printf '\nOptional Datadog setup (hosted MCP + native Pi OAuth):\n'
+printf '  PI_ENABLE_DATADOG_MCP=1 pi\n'

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Message } from "@earendil-works/pi-ai";
 import registerSubagent, { backgroundChildProcessToolNames, boundHeadText, boundText, buildChildArgs, childProcessToolNames, childToolNames, compactResult, getFinalOutput, isFailedResult, resolveChildInvocation, sanitizeText, unsupportedChildToolNames } from "./subagent/index.ts";
+import { isDatadogMcpEnabled } from "./datadog-mcp.ts";
 
 test("subagent tool contract lists the bundled agent names", () => {
 	const registered: any[] = [];
@@ -12,9 +13,14 @@ test("subagent tool contract lists the bundled agent names", () => {
 
 	const definition = registered.find((tool) => tool.name === "subagent");
 	assert.ok(definition);
-	for (const name of ["scout", "planner", "reviewer", "worker", "datadog-investigator"]) {
+	for (const name of ["scout", "planner", "reviewer", "worker"]) {
 		assert.match(definition.description, new RegExp(name));
 		assert.match(definition.parameters.properties.agent.description, new RegExp(name));
+	}
+	if (isDatadogMcpEnabled()) {
+		assert.match(definition.description, /datadog-investigator/);
+	} else {
+		assert.doesNotMatch(definition.description, /datadog-investigator/);
 	}
 	assert.ok(definition.parameters.properties.modelTier);
 	assert.ok(definition.parameters.properties.background);
@@ -43,27 +49,15 @@ test("subagent helpers concatenate final assistant text and sanitize bounded out
 	assert.equal(bounded.truncated, true);
 });
 
-test("subagent child tools include bounded CallScript by default and pass bridge-authorized Datadog names", () => {
-	const configured = childToolNames({ tools: ["read", "subagent", "datadog_query", "write", "read", "pi_program"] } as any);
-	assert.deepEqual(configured, ["read", "write", "pi_program"]);
-	assert.deepEqual(unsupportedChildToolNames({ tools: ["read", "subagent", "datadog_query", "write", "pi_program"] } as any), ["subagent", "datadog_query"]);
+test("subagent child tools use the minimal worker default and native MCP search when requested", () => {
+	const configured = childToolNames({ tools: ["read", "subagent", "tool_search", "write", "read"] } as any);
+	assert.deepEqual(configured, ["read", "tool_search", "write"]);
+	assert.deepEqual(unsupportedChildToolNames({ tools: ["read", "subagent", "tool_search", "write"] } as any), ["subagent"]);
 
 	const workerDefaults = childToolNames({} as any);
-	assert.deepEqual(workerDefaults, ["read", "bash", "write", "edit", "find", "grep", "ls", "pi_program"]);
-	assert.deepEqual(childProcessToolNames(["read", "datadog_search_tools"], ["datadog_logs", "datadog_logs"]), ["read", "datadog_search_tools", "datadog_logs"]);
-
-	const localToolNames = ["read", "datadog_search_tools", "pi_program"];
-	const forwardedToolNames = ["datadog_logs", "datadog_error_tracking"];
-	assert.deepEqual(backgroundChildProcessToolNames(localToolNames, forwardedToolNames), [
-		"read",
-		"datadog_search_tools",
-		"pi_program",
-		"datadog_logs",
-		"datadog_error_tracking",
-		"contact_supervisor",
-	]);
-	assert.deepEqual(localToolNames, ["read", "datadog_search_tools", "pi_program"]);
-	assert.equal(localToolNames.includes("datadog_logs"), false);
+	assert.deepEqual(workerDefaults, ["read", "bash", "write", "edit", "find", "grep", "ls"]);
+	assert.deepEqual(childProcessToolNames(["read", "tool_search"]), ["read", "tool_search"]);
+	assert.deepEqual(backgroundChildProcessToolNames(["read", "tool_search"]), ["read", "tool_search", "contact_supervisor"]);
 });
 
 test("subagent child arguments select both model and thinking from the effective tier", () => {
