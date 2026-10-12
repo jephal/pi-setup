@@ -47,11 +47,10 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Reads bounded recent output back through Herdr's supported `pane read` API
   - Uses normal `bash` for short commands whose output Pi needs immediately
 - Optional native Datadog MCP
-  - Registers the official OAuth-backed local MCP CLI through Pi 1.1 native MCP
+  - Connects directly to Datadog's hosted OAuth-backed Streamable HTTP MCP server
   - Disabled by default; enable it with `PI_ENABLE_DATADOG_MCP=1`
-  - Uses native deferred MCP exposure and `tool_search` rather than a custom loader
-  - Restricts the CLI endpoint to the read-only `core`, `error-tracking`, and `rum` toolsets
-  - Keeps Datadog credentials in the CLI's local OAuth store, not in this repository
+  - Uses native deferred MCP exposure and `tool_search` rather than a local CLI or custom loader
+  - Restricts the hosted endpoint to the read-only `core`, `error-tracking`, and `rum` toolsets
 - Plan mode and Plan Board
   - Branch/session-scoped authoritative plan storage
   - Dedicated derived `plan-board` Herdr pane with explicit `plan_board` display actions
@@ -103,8 +102,8 @@ pi
 
 The installer is safe to rerun. It preserves an existing
 `~/.config/pi-setup/env` file rather than overwriting it. Neovim remains optional;
-install it separately if you want the notes viewer. Datadog OAuth authentication
-also remains an explicit user step below.
+install it separately if you want the notes viewer. Datadog access remains opt-in
+and uses Pi's native hosted-MCP OAuth flow.
 
 ### Install the Pi package only
 
@@ -124,41 +123,31 @@ Then reload Pi:
 
 ## Datadog MCP (OAuth)
 
-The setup includes a personal Pi extension that registers Datadog's official local
-MCP CLI through Pi's native MCP support. Datadog is disabled by default, so sessions
-and child agents do not connect to it unless explicitly enabled. Install the CLI once
-and authenticate with Datadog:
+The setup registers Datadog's hosted Streamable HTTP MCP server through Pi's native
+MCP support. Datadog is disabled by default, so sessions and child agents do not
+connect to it unless explicitly enabled. Start Pi with the integration enabled:
 
 ```bash
-curl -sSL https://coterm.datadoghq.com/mcp-cli/install.sh | bash
-~/.local/bin/datadog_mcp_cli --site us3 login
+PI_ENABLE_DATADOG_MCP=1 pi
 ```
 
-The login command opens the Datadog OAuth flow in a browser. After completing it,
-start Pi with the integration enabled:
-
-```bash
-export PI_ENABLE_DATADOG_MCP=1
-pi
-```
+Pi opens the native OAuth flow when the hosted server needs authentication. You can
+also use `/mcp login datadog` explicitly. The default site is `us3`.
 
 Pi then connects the native `datadog` MCP server with deferred exposure. Use Pi's
 native `tool_search` to load only the Datadog capability needed for an investigation.
 Unset `PI_ENABLE_DATADOG_MCP` or set it to `0` to keep Datadog disabled.
 
-Optional environment variables:
+Optional site configuration:
 
 ```bash
-export DD_MCP_CLI="$HOME/.local/bin/datadog_mcp_cli"
-export DD_MCP_SITE=us3
-export DD_MCP_ENDPOINT_PATH='v1/mcp?toolsets=core,error-tracking,rum'
+export DD_MCP_SITE=us3       # us1, eu1, us3, us5, ap1, or ap2
 ```
 
-Read-only behavior is enforced by the Datadog IAM permissions, the explicitly
-configured MCP endpoint toolsets, and native MCP exposure filters. Grant only
-`mcp_read` and resource-read permissions (not `mcp_write`), and keep
-`DD_MCP_ENDPOINT_PATH` limited to `core`, `error-tracking`, and `rum`. Unexpected
-endpoint toolsets are rejected.
+The hosted endpoint is selected automatically for the site. Read-only behavior is
+enforced by Datadog IAM permissions, the configured read-only toolsets, and native
+MCP exposure filters. Grant only `mcp_read` and resource-read permissions, not
+`mcp_write`.
 
 ## Repository search and native Pi orchestration
 

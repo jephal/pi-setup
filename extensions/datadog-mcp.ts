@@ -1,16 +1,20 @@
 import type { ExtensionAPI, McpServerConfig } from '@earendil-works/pi-coding-agent';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 
 const DEFAULT_SITE = 'us3';
-const DEFAULT_CLI_PATH = join(homedir(), '.local', 'bin', 'datadog_mcp_cli');
-const DEFAULT_ENDPOINT_PATH = 'v1/mcp?toolsets=core,error-tracking,rum';
+const DEFAULT_ENDPOINT_PATH = '/api/unstable/mcp-server/mcp?toolsets=core,error-tracking,rum';
 const DATADOG_SERVER_NAME = 'datadog';
 const DATADOG_TOOL_PREFIX = 'mcp__datadog__';
+const DATADOG_SITE_HOSTS: Readonly<Record<string, string>> = {
+  us1: 'mcp.datadoghq.com',
+  eu1: 'mcp.datadoghq.eu',
+  us3: 'mcp.us3.datadoghq.com',
+  us5: 'mcp.us5.datadoghq.com',
+  ap1: 'mcp.ap1.datadoghq.com',
+  ap2: 'mcp.ap2.datadoghq.com',
+};
 const MUTATING_TOOL_PARTS = /(?:^|_)(add|acknowledge|close|create|delete|disable|edit|enable|modify|mute|remove|resolve|reopen|schedule|set|silence|trigger|unmute|update)(?:_|$)/i;
 
 export interface DatadogConfig {
-  cliPath: string;
   site: string;
   endpointPath: string;
 }
@@ -20,46 +24,50 @@ export function isDatadogMcpEnabled(env: NodeJS.ProcessEnv = process.env): boole
   return /^(1|true|yes|on)$/i.test(env.PI_ENABLE_DATADOG_MCP?.trim() ?? '');
 }
 
-/** Resolves the configuration passed to the official Datadog OAuth CLI. */
+/** Resolves the hosted Datadog MCP configuration. */
 export function resolveDatadogConfig(env: NodeJS.ProcessEnv = process.env): DatadogConfig {
   return {
-    cliPath: env.DD_MCP_CLI?.trim() || DEFAULT_CLI_PATH,
-    site: env.DD_MCP_SITE?.trim() || DEFAULT_SITE,
+    site: env.DD_MCP_SITE?.trim().toLowerCase() || DEFAULT_SITE,
     endpointPath: env.DD_MCP_ENDPOINT_PATH?.trim() || DEFAULT_ENDPOINT_PATH,
   };
 }
 
-/** Keep the native server restricted to Datadog's read-only investigation toolsets. */
+/** Keep the hosted server on Datadog's read-only investigation toolsets. */
 export function validateDatadogEndpointPath(endpointPath: string): void {
   if (!endpointPath || /[\u0000-\u001f\u007f]/.test(endpointPath) || endpointPath.includes('#')) {
     throw new Error('DD_MCP_ENDPOINT_PATH must be a safe relative MCP path.');
   }
-  const separator = endpointPath.indexOf('?');
-  const base = separator < 0 ? endpointPath : endpointPath.slice(0, separator);
-  if (base !== 'v1/mcp' || endpointPath.startsWith('/') || /^[a-z][a-z\d+.-]*:/i.test(endpointPath) || endpointPath.startsWith('//')) {
-    throw new Error('DD_MCP_ENDPOINT_PATH must be the relative path v1/mcp.');
+  const parsed = new URL(endpointPath, 'https://datadog-mcp.invalid');
+  if (parsed.origin !== 'https://datadog-mcp.invalid' || parsed.pathname !== '/api/unstable/mcp-server/mcp') {
+    throw new Error('DD_MCP_ENDPOINT_PATH must be /api/unstable/mcp-server/mcp.');
   }
-  const query = separator < 0 ? '' : endpointPath.slice(separator + 1);
-  if (/%(?![0-9a-fA-F]{2})/.test(query)) throw new Error('DD_MCP_ENDPOINT_PATH has a malformed query.');
-  const params = new URLSearchParams(query);
-  const keys = [...params.keys()];
-  if (keys.length === 0 || keys.some((key) => key !== 'toolsets') || params.getAll('toolsets').length !== 1) {
+  const keys = [...parsed.searchParams.keys()];
+  if (keys.some((key) => key !== 'toolsets') || parsed.searchParams.getAll('toolsets').length > 1) {
     throw new Error('DD_MCP_ENDPOINT_PATH may contain only one toolsets query parameter.');
   }
-  const values = params.get('toolsets')!.split(',').map((item) => item.trim()).filter(Boolean);
+  const toolsets = parsed.searchParams.get('toolsets');
+  if (!toolsets) return;
+  const values = toolsets.split(',').map((item) => item.trim()).filter(Boolean);
   if (values.length === 0 || values.some((value) => !new Set(['core', 'error-tracking', 'rum']).has(value))) {
     throw new Error('DD_MCP_ENDPOINT_PATH contains unexpected toolsets; configure only core,error-tracking,rum.');
   }
 }
 
-/** Build the Pi-native stdio MCP configuration without starting the CLI. */
+export function datadogMcpEndpoint(site: string, endpointPath: string): string {
+  const host = DATADOG_SITE_HOSTS[site.trim().toLowerCase()];
+  if (!host) {
+    throw new Error(`DD_MCP_SITE is unsupported by the hosted Datadog MCP server: ${site}. Use us1, eu1, us3, us5, ap1, or ap2.`);
+  }
+  validateDatadogEndpointPath(endpointPath);
+  return `https://${host}${endpointPath}`;
+}
+
+/** Build the Pi-native hosted HTTP MCP configuration without a local helper process. */
 export function createDatadogMcpServerConfig(env: NodeJS.ProcessEnv = process.env): McpServerConfig {
   const config = resolveDatadogConfig(env);
-  validateDatadogEndpointPath(config.endpointPath);
   return {
-    type: 'stdio',
-    command: config.cliPath,
-    args: ['--site', config.site, '--endpoint-path', config.endpointPath, '--force-oauth'],
+    type: 'http',
+    url: datadogMcpEndpoint(config.site, config.endpointPath),
     exposure: 'deferred',
     description: 'Read-only Datadog investigation tools for errors, logs, RUM, metrics, traces, and events.',
     toolExposure: {
