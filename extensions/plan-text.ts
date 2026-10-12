@@ -2,11 +2,11 @@
 export const PLAN_DISCUSSION_GUIDANCE =
 	"Planning is available in every approval mode. Inspect repository code or documentation when useful, but do not force a research or grilling session for ordinary tasks. Make reasonable assumptions and ask focused questions only when an important unknown blocks useful or safe progress, or when the user asks to talk the details through. If the user wants a grilling session, continue the conversation until aligned before saving the plan.";
 
-export const PLAN_BULLET_GUIDANCE =
-	"Saved plans must use bullet points only. Keep them short: key decisions and actionable tasks, with useful file or documentation anchors when they help. Add more bullets when the user asks for detail; do not require headings or long narrative sections.";
+export const PLAN_FORMAT_GUIDANCE =
+	"Use concise bullet points for key decisions and main points. Present actionable tasks as a short numbered sequence (1., 2., 3.), with useful file or documentation anchors when they help. Add more bullets or numbered steps when the user asks for detail; avoid headings and long narrative sections.";
 
 export const PLAN_CONTEXT_GUIDANCE =
-	`${PLAN_DISCUSSION_GUIDANCE} ${PLAN_BULLET_GUIDANCE} Review mode remains read-only: a saved plan does not authorize implementation or code changes.`;
+	`${PLAN_DISCUSSION_GUIDANCE} ${PLAN_FORMAT_GUIDANCE} Review mode remains read-only: a saved plan does not authorize implementation or code changes.`;
 
 export const VISUALIZATION_ALL_MODE_GUIDANCE =
 	"visualize: persistent Excalidraw diagrams belong in Herdr's dedicated visualization-viewer pane, where terminal_viewer open/update/status/close returns compact pane/revision/status acknowledgements; keep Mermaid and preview wireframes in Pi chat. Use the preserved browser viewer only when an external loopback browser URL is explicitly requested; it is non-default and read-only in Review mode. Use artifact only for an explicit project-relative .excalidraw write. No remote or CDN assets are used.";
@@ -21,11 +21,11 @@ export const PLAN_TOOL_DESCRIPTION =
 	`Planning tool available in every approval mode. Create or refine a concise plan, then continue under the current mode's existing permissions. Inspect or clear the current branch plan in any mode. ${PLAN_CONTEXT_GUIDANCE} ${VISUALIZATION_ALL_MODE_GUIDANCE} ${PLAN_BOARD_GUIDANCE}`;
 
 export const PLAN_TOOL_PROMPT_SNIPPET =
-	"Create short bullet-point plans in any mode; ask questions when important details are unclear or the user wants to talk them through";
+	"Use concise bullets for main points and numbered task steps in any mode; ask questions only when needed or requested";
 
 export const PLAN_TOOL_PROMPT_GUIDELINES = [
 	PLAN_DISCUSSION_GUIDANCE,
-	PLAN_BULLET_GUIDANCE,
+	PLAN_FORMAT_GUIDANCE,
 	VISUALIZATION_ALL_MODE_GUIDANCE,
 	PLAN_UPDATE_RESPONSE_GUIDANCE,
 	PLAN_BOARD_GUIDANCE,

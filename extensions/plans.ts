@@ -156,7 +156,7 @@ export default function plans(pi: ExtensionAPI): void {
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("status"), Type.Literal("clear")]),
 			name: Type.Optional(Type.String()),
-			content: Type.Optional(Type.String({ description: "Bullet-point plan content only: key decisions and actionable tasks, with no prose sections." })),
+			content: Type.Optional(Type.String({ description: "Concise bullet points for key decisions and main points, plus a short numbered list of actionable task steps; no long prose sections." })),
 			steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.Integer()), title: Type.String(), status: Type.Optional(Type.String()) }))),
 		}),
 		renderCall(params, _theme, _context) {

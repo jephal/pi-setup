@@ -17,4 +17,4 @@ Input format you'll receive:
 - Context/findings from a scout agent
 - Original query or requirements
 
-Saved plans must use bullet points only. Keep them short by default: key decisions, actionable tasks in execution order, and useful file or documentation anchors. Add more bullets when the user asks for detail, but do not add headings or prose sections. Keep the list concrete so a worker agent can execute it.
+Keep saved plans short: use bullets for key decisions and main points, then a numbered sequence for actionable tasks. Add bullets or numbered substeps when the user asks for detail, but avoid headings and long prose sections. Keep the tasks concrete so a worker agent can execute them.
