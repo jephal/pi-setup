@@ -90,3 +90,4 @@ fi
 printf '\nOptional Datadog setup:\n'
 printf '  curl -sSL https://coterm.datadoghq.com/mcp-cli/install.sh | bash\n'
 printf '  ~/.local/bin/datadog_mcp_cli --site us3 login\n'
+printf '  PI_ENABLE_DATADOG_MCP=1 pi\n'

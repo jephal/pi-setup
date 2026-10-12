@@ -33,6 +33,7 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withHerdrBlock } from "../herdr-blocking.ts";
+import { isDatadogMcpEnabled } from "../datadog-mcp.ts";
 import {
 	BackgroundTaskManager,
 	type BackgroundBatchSnapshot,
@@ -52,11 +53,6 @@ import {
 	resolveAgentModel,
 	thinkingRoute,
 } from "./models.ts";
-import {
-	createMcpForwardingBridge,
-	getMcpForwardingProvider,
-	type McpForwardingBridge,
-} from "../mcp-forwarding.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CHAIN_STEPS = MAX_PARALLEL_TASKS;
@@ -78,7 +74,7 @@ const BATCH_RESULT_MARKER_RESERVE_LINES = 4;
 const DEFAULT_CHILD_TOOL_ALLOWLIST = ["read", "bash", "write", "edit", "find", "grep", "ls"] as const;
 /** Explicit frontmatter may opt into these additional, still child-safe capabilities. */
 const SAFE_CHILD_TOOL_ALLOWLIST = [
-	...DEFAULT_CHILD_TOOL_ALLOWLIST, "ask_questions", "datadog_search_tools",
+	...DEFAULT_CHILD_TOOL_ALLOWLIST, "ask_questions", "tool_search",
 	"fovea_sketch", "fovea_focus", "fovea_dwell", "fovea_impact", "herdr_shell",
 ] as const;
 const SAFE_CHILD_TOOLS = new Set<string>(SAFE_CHILD_TOOL_ALLOWLIST);
@@ -339,17 +335,17 @@ export function buildChildArgs(
 	return resolveChildInvocation(agent, parentCtx, overrideTier).args;
 }
 
-/** Bridge-provided remote names may be registered by the loader later, but must not be pre-registered. */
-export function childProcessToolNames(localToolNames: readonly string[], forwardedToolNames: readonly string[] = []): string[] {
-	return [...new Set([...localToolNames, ...forwardedToolNames])];
+/** Adds explicitly selected tools without introducing tools implicitly. */
+export function childProcessToolNames(localToolNames: readonly string[], additionalToolNames: readonly string[] = []): string[] {
+	return [...new Set([...localToolNames, ...additionalToolNames])];
 }
 
-/** Adds the supervisor capability to a background child without activating forwarded tools. */
+/** Adds the supervisor capability to a background child. */
 export function backgroundChildProcessToolNames(
 	localToolNames: readonly string[],
-	forwardedToolNames: readonly string[] = [],
+	additionalToolNames: readonly string[] = [],
 ): string[] {
-	return childProcessToolNames(localToolNames, [...forwardedToolNames, SUPERVISOR_TOOL_NAME]);
+	return childProcessToolNames(localToolNames, [...additionalToolNames, SUPERVISOR_TOOL_NAME]);
 }
 
 async function writeRecoveryArtifact(agentName: string, output: string): Promise<string | undefined> {
@@ -482,7 +478,6 @@ async function runSingleAgent(
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
-	let forwardingBridge: McpForwardingBridge | undefined;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -517,29 +512,9 @@ async function runSingleAgent(
 			currentResult.errorMessage = "The agent has no child-safe tools configured.";
 			return currentResult;
 		}
-		// Datadog is an explicit frontmatter opt-in. Workers with no tools never
-		// connect to it; forwarded remote tools are never pre-activated.
-		const requiresDatadogForwarding = toolNames.includes("datadog_search_tools");
-		const forwardingProvider = requiresDatadogForwarding ? getMcpForwardingProvider() : undefined;
-		if (requiresDatadogForwarding && !forwardingProvider) {
-			currentResult.exitCode = 1;
-			currentResult.errorMessage = "Datadog MCP forwarding is unavailable in the parent session.";
-			return currentResult;
-		}
-		if (forwardingProvider) {
-			try {
-				forwardingBridge = await createMcpForwardingBridge(forwardingProvider, parentCtx, signal);
-			} catch (error) {
-				currentResult.exitCode = 1;
-				currentResult.errorMessage = error instanceof Error ? error.message : String(error);
-				return currentResult;
-			}
-		}
-
-		// The bridge passes allowed remote names so the child can use a tool after
-		// datadog_search_tools registers it on demand. Do not pre-register remote
-		// tools: Pi activates allowlisted registered tools in the child prompt.
-		args.push("--tools", childProcessToolNames(toolNames, forwardingBridge?.toolNames).join(","));
+		// Native MCP servers are loaded by the child Pi process from the inherited
+		// environment. Only explicitly configured agents receive tool_search.
+		args.push("--tools", childProcessToolNames(toolNames).join(","));
 
 		if (agent.systemPrompt.trim()) {
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
@@ -554,11 +529,6 @@ async function runSingleAgent(
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
 			const childEnv = { ...process.env };
-			if (forwardingBridge) Object.assign(childEnv, forwardingBridge.env);
-			else {
-				delete childEnv.PI_MCP_FORWARD_SOCKET;
-				delete childEnv.PI_MCP_FORWARD_TOKEN;
-			}
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				env: childEnv,
@@ -674,7 +644,6 @@ async function runSingleAgent(
 			} catch {
 				/* ignore */
 			}
-		await forwardingBridge?.close();
 	}
 }
 
@@ -683,7 +652,7 @@ const BUNDLED_AGENT_GUIDANCE = [
 	"planner — read-only implementation planning (default medium: claude-opus-5.5, low thinking)",
 	"reviewer — read-only code quality and security review (default medium: claude-opus-5.5, low thinking)",
 	"worker — general implementation with full capabilities (default medium: gpt-6-sol, medium thinking)",
-	"datadog-investigator — read-only evidence-first Datadog investigation (default fast: gpt-6-luna, medium thinking)",
+	...(isDatadogMcpEnabled() ? ["datadog-investigator — read-only evidence-first Datadog investigation (default fast: gpt-6-luna, medium thinking)"] : []),
 	`Tier routes: ${MODEL_ROUTE_SUMMARY}`,
 ].join("; ");
 const AGENT_NAME_DESCRIPTION = `Exact bundled agent names: ${BUNDLED_AGENT_GUIDANCE}. Custom user/project agents may also be available; they are discovered at runtime.`;
@@ -887,16 +856,11 @@ async function prepareBackgroundSpec(
 	sessionSignal: AbortSignal,
 ): Promise<PreparedBackgroundSpec> {
 	const supervisorBridge = await createSupervisorBridge(taskId, onReport, operationSignal, sessionSignal);
-	let forwardingBridge: McpForwardingBridge | undefined;
 	let promptDir: string | undefined;
 	let promptPath: string | undefined;
 	try {
 		const toolNames = childToolNames(agent);
 		if (toolNames.length === 0) throw new Error("The agent has no child-safe tools configured.");
-		const requiresDatadogForwarding = toolNames.includes("datadog_search_tools");
-		const forwardingProvider = requiresDatadogForwarding ? getMcpForwardingProvider() : undefined;
-		if (requiresDatadogForwarding && !forwardingProvider) throw new Error("Datadog MCP forwarding is unavailable in the parent session.");
-		if (forwardingProvider) forwardingBridge = await createMcpForwardingBridge(forwardingProvider, ctx, operationSignal, sessionSignal);
 		const availableModels = ctx.modelRegistry.getAvailable().map((model) => ({ provider: model.provider, id: model.id }));
 		const resolved = resolveAgentModel(agent, ctx.model ?? {}, modelTier, availableModels);
 		const childArgs = ["--mode", "rpc", "--no-session"];
@@ -907,25 +871,20 @@ async function prepareBackgroundSpec(
 				?? ctx.thinkingLevel;
 			if (thinkingLevel) childArgs.push("--thinking", thinkingLevel);
 		}
-		childArgs.push("--tools", backgroundChildProcessToolNames(toolNames, forwardingBridge?.toolNames).join(","));
+		childArgs.push("--tools", backgroundChildProcessToolNames(toolNames).join(","));
 		if (agent.systemPrompt.trim()) {
 			const prompt = await writePromptToTempFile(agent.name, agent.systemPrompt);
 			promptDir = prompt.dir;
 			promptPath = prompt.filePath;
 			childArgs.push("--append-system-prompt", promptPath);
 		}
-		const bridge: SupervisorBridge = {
-			env: { ...supervisorBridge.env, ...(forwardingBridge?.env ?? {}) },
-			async close() {
-				await Promise.all([supervisorBridge.close(), forwardingBridge?.close()]);
-			},
-		};
+		const bridge: SupervisorBridge = supervisorBridge;
 		const cleanupPrompt = async (): Promise<void> => {
 			if (promptPath) await fs.promises.unlink(promptPath).catch(() => undefined);
 			if (promptDir) await fs.promises.rmdir(promptDir).catch(() => undefined);
 		};
 		const cleanup = async (): Promise<void> => {
-			await Promise.all([supervisorBridge.close(), forwardingBridge?.close()]);
+			await supervisorBridge.close();
 			await cleanupPrompt();
 		};
 		const spec: BackgroundTaskSpec = {
@@ -958,7 +917,6 @@ async function prepareBackgroundSpec(
 		return { spec, cleanupPrompt, cleanup };
 	} catch (error) {
 		await supervisorBridge.close().catch(() => undefined);
-		await forwardingBridge?.close().catch(() => undefined);
 		if (promptPath) await fs.promises.unlink(promptPath).catch(() => undefined);
 		if (promptDir) await fs.promises.rmdir(promptDir).catch(() => undefined);
 		throw error;
@@ -1091,7 +1049,6 @@ export default function (pi: ExtensionAPI) {
 					if (unknown) return { content: [{ type: "text", text: `Unknown agent: ${unknown.agent}.` }], details: makeDetails("parallel")([]), isError: true };
 					for (const agent of taskAgents as AgentConfig[]) {
 						if (childToolNames(agent).length === 0) return { content: [{ type: "text", text: `The agent ${agent.name} has no child-safe tools configured.` }], details: makeDetails("parallel")([]), isError: true };
-						if (childToolNames(agent).includes("datadog_search_tools") && !getMcpForwardingProvider()) return { content: [{ type: "text", text: "Datadog MCP forwarding is unavailable in the parent session." }], details: makeDetails("parallel")([]), isError: true };
 					}
 					const prepared: PreparedBackgroundSpec[] = [];
 					try {

@@ -5,6 +5,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { isDatadogMcpEnabled } from "../datadog-mcp.ts";
 import { parseModelTier, parseThinkingLevel, type ModelTier, type ThinkingLevel } from "./models.ts";
 
 export type AgentScope = "user" | "project" | "both";
@@ -13,6 +14,7 @@ export interface AgentConfig {
 	name: string;
 	description: string;
 	tools?: string[];
+	requires?: string[];
 	model?: string;
 	modelTier?: ModelTier;
 	thinkingLevel?: ThinkingLevel;
@@ -62,11 +64,17 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			?.split(",")
 			.map((t: string) => t.trim())
 			.filter(Boolean);
+		const requires = frontmatter.requires
+			?.split(",")
+			.map((requirement: string) => requirement.trim())
+			.filter(Boolean);
+		if (requires?.includes("datadog_mcp") && !isDatadogMcpEnabled()) continue;
 
 		agents.push({
 			name: frontmatter.name,
 			description: frontmatter.description,
 			tools: tools && tools.length > 0 ? tools : undefined,
+			requires: requires && requires.length > 0 ? requires : undefined,
 			model: frontmatter.model,
 			modelTier: parseModelTier(frontmatter.modelTier),
 			thinkingLevel: parseThinkingLevel(frontmatter.thinkingLevel),

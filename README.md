@@ -46,10 +46,11 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Runs commands in the pane without blocking Pi
   - Reads bounded recent output back through Herdr's supported `pane read` API
   - Uses normal `bash` for short commands whose output Pi needs immediately
-- Datadog MCP
-  - Connects pi to Datadog through the official OAuth-backed local MCP CLI
-  - Keeps only a small `datadog_search_tools` loader active in pi's context
-  - Loads matching `core`, `error-tracking`, and `rum` tools on demand
+- Optional native Datadog MCP
+  - Registers the official OAuth-backed local MCP CLI through Pi 1.1 native MCP
+  - Disabled by default; enable it with `PI_ENABLE_DATADOG_MCP=1`
+  - Uses native deferred MCP exposure and `tool_search` rather than a custom loader
+  - Restricts the CLI endpoint to the read-only `core`, `error-tracking`, and `rum` toolsets
   - Keeps Datadog credentials in the CLI's local OAuth store, not in this repository
 - Plan mode and Plan Board
   - Branch/session-scoped authoritative plan storage
@@ -123,10 +124,10 @@ Then reload Pi:
 
 ## Datadog MCP (OAuth)
 
-The setup includes a personal pi extension that bridges Datadog's official local MCP
-CLI into pi. Datadog-aware subagents can forward their tool searches and calls to the
-parent pi process, so the OAuth-backed MCP client stays in the parent and is not
-recreated in every child process. Install the CLI once and authenticate with Datadog:
+The setup includes a personal Pi extension that registers Datadog's official local
+MCP CLI through Pi's native MCP support. Datadog is disabled by default, so sessions
+and child agents do not connect to it unless explicitly enabled. Install the CLI once
+and authenticate with Datadog:
 
 ```bash
 curl -sSL https://coterm.datadoghq.com/mcp-cli/install.sh | bash
@@ -134,11 +135,16 @@ curl -sSL https://coterm.datadoghq.com/mcp-cli/install.sh | bash
 ```
 
 The login command opens the Datadog OAuth flow in a browser. After completing it,
-restart pi or run `/datadog-connect`. The extension uses the US3 endpoint and makes
-`core`, `error-tracking`, and `rum` tools searchable on demand. Only the small
-`datadog_search_tools` loader is active initially, so Datadog tool definitions do not
-bloat every session. Run `/datadog-reset` after an investigation to unload any
-Datadog tools activated during the session.
+start Pi with the integration enabled:
+
+```bash
+export PI_ENABLE_DATADOG_MCP=1
+pi
+```
+
+Pi then connects the native `datadog` MCP server with deferred exposure. Use Pi's
+native `tool_search` to load only the Datadog capability needed for an investigation.
+Unset `PI_ENABLE_DATADOG_MCP` or set it to `0` to keep Datadog disabled.
 
 Optional environment variables:
 
@@ -148,12 +154,11 @@ export DD_MCP_SITE=us3
 export DD_MCP_ENDPOINT_PATH='v1/mcp?toolsets=core,error-tracking,rum'
 ```
 
-Read-only behavior is enforced by two authoritative boundaries: the Datadog IAM
-permissions on the account and the explicitly configured MCP endpoint toolsets. Grant
-only `mcp_read` and resource-read permissions (not `mcp_write`), and keep
-`DD_MCP_ENDPOINT_PATH` limited to the configured `core`, `error-tracking`, and `rum`
-toolsets. The extension does not infer permissions from tool names or apply a `write`
-name heuristic; unexpected endpoint toolsets are rejected.
+Read-only behavior is enforced by the Datadog IAM permissions, the explicitly
+configured MCP endpoint toolsets, and native MCP exposure filters. Grant only
+`mcp_read` and resource-read permissions (not `mcp_write`), and keep
+`DD_MCP_ENDPOINT_PATH` limited to `core`, `error-tracking`, and `rum`. Unexpected
+endpoint toolsets are rejected.
 
 ## Repository search and native Pi orchestration
 
@@ -258,18 +263,10 @@ The package intentionally has no standalone TypeScript project configuration: Pi
 ## Subagents
 
 The setup includes Pi's first-party subagent workflow with bundled defaults. The
-`datadog-investigator` agent uses the lazy Datadog loader; when it runs as a child,
-Datadog tool metadata and calls are forwarded through a private per-child bridge to
-the parent process.
-
-The forwarding bridge is fail-closed, scoped to the Datadog tools exposed by the
-parent's configured MCP endpoint, and does not pass OAuth credentials to child
-processes.
-
-```text
-parent pi ── private Unix socket ──> child datadog tools
-    └── Datadog MCP client / OAuth CLI
-```
+`datadog-investigator` agent is available only when `PI_ENABLE_DATADOG_MCP=1` and
+uses Pi's native `tool_search` plus the `mcp__datadog__...` tool namespace. Child Pi
+processes inherit the opt-in environment and native MCP configuration; no custom
+OAuth session or forwarding bridge is created.
 
 Subagents use role-aware model tiers. Bundled agents default to the medium
 route for ordinary work; the main model can override a single call, parallel

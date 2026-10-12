@@ -1,19 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  discoverTools,
-  getDatadogCapabilityProvider,
-  formatConnectionError,
-  keepDiscoveredToolsInactive,
+  createDatadogMcpServerConfig,
+  isDatadogMcpEnabled,
+  isDatadogReadOnlyToolName,
   resolveDatadogConfig,
-  default as datadogMcpExtension,
-  setDatadogClientForTesting,
   validateDatadogEndpointPath,
+  default as datadogMcpExtension,
 } from "./datadog-mcp.ts";
-import { getMcpForwardingProvider } from "./mcp-forwarding.ts";
 
-test("Datadog configuration resolves one effective set of safe values", () => {
-  assert.deepEqual(resolveDatadogConfig({ DD_MCP_CLI: " /tmp/datadog cli ", DD_MCP_SITE: " eu1 ", DD_MCP_ENDPOINT_PATH: " v1/mcp?toolsets=core " } as any), {
+test("Datadog is disabled unless explicitly enabled", () => {
+  assert.equal(isDatadogMcpEnabled({} as NodeJS.ProcessEnv), false);
+  assert.equal(isDatadogMcpEnabled({ PI_ENABLE_DATADOG_MCP: "0" } as NodeJS.ProcessEnv), false);
+  assert.equal(isDatadogMcpEnabled({ PI_ENABLE_DATADOG_MCP: "true" } as NodeJS.ProcessEnv), true);
+  assert.equal(isDatadogMcpEnabled({ PI_ENABLE_DATADOG_MCP: "on" } as NodeJS.ProcessEnv), true);
+});
+
+test("Datadog configuration resolves safe CLI values", () => {
+  assert.deepEqual(resolveDatadogConfig({
+    DD_MCP_CLI: " /tmp/datadog cli ",
+    DD_MCP_SITE: " eu1 ",
+    DD_MCP_ENDPOINT_PATH: " v1/mcp?toolsets=core ",
+  } as NodeJS.ProcessEnv), {
     cliPath: "/tmp/datadog cli",
     site: "eu1",
     endpointPath: "v1/mcp?toolsets=core",
@@ -25,264 +33,51 @@ test("Datadog endpoint validation rejects broader or implicit toolsets", () => {
   assert.throws(() => validateDatadogEndpointPath("v1/mcp?toolsets=all"), /unexpected.*toolsets/i);
   assert.throws(() => validateDatadogEndpointPath("v1/mcp"), /toolsets/i);
   for (const unsafe of [
+    "/v1/mcp?toolsets=core",
     "https://example.test/v1/mcp?toolsets=core",
-    "v1/other?toolsets=core",
-    "v1/mcp?toolsets=core&admin=true",
-    "v1/mcp?toolsets=core#fragment",
-    "v1/mcp?toolsets=core%ZZ",
+    "v1/mcp?toolsets=core#token",
+    "v1/mcp?toolsets=core%",
   ]) assert.throws(() => validateDatadogEndpointPath(unsafe));
 });
 
-test("Datadog connection errors quote paths and redact credential-shaped values", () => {
-  const message = formatConnectionError(new Error([
-    "Authorization: Bearer bearer-secret",
-    "Basic basic-secret",
-    "access_token=url-secret",
-    '{"password":"json-secret"}',
-    "Cookie: session=cookie-secret",
-    "access_token%3Dencoded-secret",
-    "refresh_token=newline-secret\nnext-line",
-  ].join(" ")), {
-    cliPath: "/tmp/O'Reilly/datadog cli\nunsafe",
-    site: "us3\runsafe",
-    endpointPath: "https://user:password@example.test/v1/mcp?token=secret",
-  });
-  assert.match(message, /'\\''/);
-  for (const secret of ["bearer-secret", "basic-secret", "url-secret", "json-secret", "cookie-secret", "encoded-secret", "newline-secret", "password@example"]) {
-    assert.doesNotMatch(message, new RegExp(secret));
-  }
-  assert.doesNotMatch(message, /[\r\n\u0000-\u001f]/);
+test("native Datadog MCP configuration uses deferred read-only exposure", () => {
+  const config = createDatadogMcpServerConfig({
+    DD_MCP_CLI: "/tmp/datadog_mcp_cli",
+    DD_MCP_SITE: "us5",
+    DD_MCP_ENDPOINT_PATH: "v1/mcp?toolsets=core,error-tracking,rum",
+  } as NodeJS.ProcessEnv);
+  assert.equal(config.type, "stdio");
+  assert.equal(config.command, "/tmp/datadog_mcp_cli");
+  assert.deepEqual(config.args, ["--site", "us5", "--endpoint-path", "v1/mcp?toolsets=core,error-tracking,rum", "--force-oauth"]);
+  assert.equal(config.exposure, "deferred");
+  assert.equal(config.toolExposure?.["create_*"], "hidden");
 });
 
-test("Datadog discovery does not activate every newly registered remote tool", () => {
-  const remaining = keepDiscoveredToolsInactive(
-    ["read", "datadog_search_tools", "datadog_logs", "datadog_error_tracking"],
-    new Set(["read", "datadog_search_tools"]),
-    new Set(["datadog_logs", "datadog_error_tracking"]),
-  );
-  assert.deepEqual(remaining, ["read", "datadog_search_tools"]);
+test("native registration is opt-in and does not connect while disabled", () => {
+  const previous = process.env.PI_ENABLE_DATADOG_MCP;
+  delete process.env.PI_ENABLE_DATADOG_MCP;
+  const registrations: unknown[] = [];
+  datadogMcpExtension({ registerMcpServer: (...args: unknown[]) => registrations.push(args) } as any);
+  assert.deepEqual(registrations, []);
+  if (previous === undefined) delete process.env.PI_ENABLE_DATADOG_MCP;
+  else process.env.PI_ENABLE_DATADOG_MCP = previous;
 });
 
-test("Datadog discovery preserves an explicitly active known remote tool", () => {
-  const remaining = keepDiscoveredToolsInactive(
-    ["datadog_logs", "datadog_error_tracking"],
-    new Set(["datadog_logs"]),
-    new Set(["datadog_logs", "datadog_error_tracking"]),
-  );
-  assert.deepEqual(remaining, ["datadog_logs"]);
+test("native registration passes the CLI config to Pi", () => {
+  const previous = process.env.PI_ENABLE_DATADOG_MCP;
+  process.env.PI_ENABLE_DATADOG_MCP = "1";
+  const registrations: unknown[][] = [];
+  datadogMcpExtension({ registerMcpServer: (...args: unknown[]) => registrations.push(args) } as any);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0][0], "datadog");
+  assert.equal((registrations[0][1] as any).exposure, "deferred");
+  if (previous === undefined) delete process.env.PI_ENABLE_DATADOG_MCP;
+  else process.env.PI_ENABLE_DATADOG_MCP = previous;
 });
 
-test("concurrent Datadog discovery shares one MCP list request", async () => {
-  let calls = 0;
-  let release: (() => void) | undefined;
-  const listed = new Promise<void>((resolve) => { release = resolve; });
-  const client = {
-    async listTools() {
-      calls++;
-      await listed;
-      return { tools: [{ name: "logs", description: "Search logs", inputSchema: { type: "object" } }] };
-    },
-  };
-  setDatadogClientForTesting(client as any);
-  let activeTools = ["read", "datadog_search_tools"];
-  const pi = {
-    getActiveTools: () => activeTools,
-    setActiveTools: (next: string[]) => { activeTools = next; },
-    registerTool() {},
-  };
-
-  const first = discoverTools(client as any, pi as any);
-  const second = discoverTools(client as any, pi as any);
-  release!();
-  assert.deepEqual(await Promise.all([first, second]), [1, 1]);
-  assert.equal(calls, 1);
-  setDatadogClientForTesting(undefined);
-});
-
-test("Datadog session start replaces a pending lifecycle before the next client is used", async () => {
-  let release!: () => void;
-  let closeCalls = 0;
-  const oldClient = {
-    async listTools() {
-      await new Promise<void>((resolve) => { release = resolve; });
-      return { tools: [{ name: "old_tool", description: "old", inputSchema: { type: "object" } }] };
-    },
-    async close() { closeCalls++; release?.(); },
-  };
-  const newClient = {
-    async listTools() { return { tools: [{ name: "logs", description: "new", inputSchema: { type: "object" } }] }; },
-    async close() { /* test seam */ },
-  };
-  const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void> | void>();
-  const definitions: any[] = [];
-  let activeTools = ["datadog_search_tools"];
-  const pi = {
-    on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => handlers.set(event, handler),
-    registerTool: (definition: any) => definitions.push(definition),
-    registerCommand: () => undefined,
-    getAllTools: () => definitions,
-    getActiveTools: () => activeTools,
-    setActiveTools: (names: string[]) => { activeTools = names; },
-  };
-  const ctx = { cwd: process.cwd(), ui: { notify: () => undefined } };
-  setDatadogClientForTesting(oldClient as any);
-  datadogMcpExtension(pi as any);
-  const pendingDiscovery = discoverTools(oldClient as any, pi as any);
-  const starting = handlers.get("session_start")!(undefined, ctx);
-  await starting;
-  await assert.rejects(pendingDiscovery, /superseded|shut down/i);
-  assert.equal(closeCalls, 1);
-
-  setDatadogClientForTesting(newClient as any);
-  assert.equal(await discoverTools(newClient as any, pi as any), 1);
-  assert.equal(definitions.filter((definition) => definition.name === "datadog_logs").length, 1);
-  setDatadogClientForTesting(undefined);
-});
-
-test("Datadog forwarding provider is restored after session replacement", async () => {
-  const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void> | void>();
-  const definitions: any[] = [];
-  const pi = {
-    on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => handlers.set(event, handler),
-    registerTool: (definition: any) => definitions.push(definition),
-    registerCommand: () => undefined,
-    getAllTools: () => definitions,
-    getActiveTools: () => ["datadog_search_tools"],
-    setActiveTools: () => undefined,
-  };
-  const ctx = { ui: { notify: () => undefined } };
-
-  datadogMcpExtension(pi as any);
-  assert.ok(getMcpForwardingProvider());
-  await handlers.get("session_shutdown")!(undefined, ctx);
-  assert.equal(getMcpForwardingProvider(), undefined);
-  await handlers.get("session_start")!(undefined, ctx);
-  assert.ok(getMcpForwardingProvider());
-  await handlers.get("session_shutdown")!(undefined, ctx);
-  assert.equal(getMcpForwardingProvider(), undefined);
-});
-
-test("Datadog discovery rejects results from a client invalidated while listing", async () => {
-  let release!: () => void;
-  const listed = new Promise<void>((resolve) => { release = resolve; });
-  const oldClient = {
-    async listTools() {
-      await listed;
-      return { tools: [{ name: "old_tool", description: "old", inputSchema: { type: "object" } }] };
-    },
-  };
-  const newClient = { async listTools() { return { tools: [] }; } };
-  const definitions: any[] = [];
-  const pi = {
-    getActiveTools: () => ["read", "datadog_old_tool"],
-    setActiveTools: () => undefined,
-    registerTool: (definition: any) => definitions.push(definition),
-  };
-  setDatadogClientForTesting(oldClient as any);
-  const pending = discoverTools(oldClient as any, pi as any);
-  setDatadogClientForTesting(newClient as any);
-  release();
-  await assert.rejects(pending, /superseded|shut down/i);
-  assert.equal(definitions.length, 0);
-  setDatadogClientForTesting(undefined);
-});
-
-test("Datadog schema refresh reuses one Pi tool and resolves the current client by name", async () => {
-  const definitions: any[] = [];
-  const pi = {
-    getActiveTools: () => ["read"],
-    setActiveTools: () => undefined,
-    registerTool: (definition: any) => definitions.push(definition),
-  };
-  const oldClient = {
-    async listTools() { return { tools: [{ name: "logs", description: "old schema", inputSchema: { type: "object", properties: { old: { type: "string" } } } }] }; },
-    async close() { /* test seam */ },
-  };
-  let calls = 0;
-  const newClient = {
-    async listTools() { return { tools: [{ name: "logs", description: "new schema", inputSchema: { type: "object", properties: { fresh: { type: "boolean" } } } }] }; },
-    async callTool() { calls++; return { content: [{ type: "text", text: "current" }], details: {} }; },
-  };
-  setDatadogClientForTesting(oldClient as any);
-  await discoverTools(oldClient as any, pi as any);
-  setDatadogClientForTesting(newClient as any);
-  await discoverTools(newClient as any, pi as any);
-  assert.equal(definitions.filter((definition) => definition.name === "datadog_logs").length, 1);
-  await definitions.find((definition) => definition.name === "datadog_logs").execute("call", {}, new AbortController().signal, undefined, {});
-  assert.equal(calls, 1);
-  setDatadogClientForTesting(undefined);
-  await assert.rejects(
-    definitions.find((definition) => definition.name === "datadog_logs").execute("call", {}, new AbortController().signal, undefined, {}),
-    /unavailable|connected/i,
-  );
-});
-
-test("dynamic Datadog capabilities refresh metadata and validate the current remote schema", async () => {
-  let listings = 0;
-  let calls = 0;
-  const client = {
-    async listTools() {
-      listings++;
-      return { tools: [{ name: "logs", description: "current logs", inputSchema: {
-        type: "object", properties: { fresh: { type: "boolean" } }, required: ["fresh"], additionalProperties: false,
-      } }] };
-    },
-    async callTool() { calls++; return { content: [{ type: "text", text: "current" }] }; },
-  };
-  setDatadogClientForTesting(client as any);
-  const provider = getDatadogCapabilityProvider();
-  const ctx = { cwd: process.cwd() } as any;
-  assert.equal((await provider.describe("datadog_logs", ctx) as any).parameters.required[0], "fresh");
-  await assert.rejects(provider.call("datadog_logs", { old: "schema" }, ctx), /Invalid arguments/);
-  const result = await provider.call("datadog_logs", { fresh: true }, ctx) as any;
-  assert.match(result.content[0].text, /current/);
-  assert.equal(calls, 1);
-  assert.ok(listings >= 3);
-  setDatadogClientForTesting(undefined);
-});
-
-test("Datadog rejects mutation-capable remote tools and omits binary output", async () => {
-  let calls = 0;
-  const client = {
-    async listTools() {
-      return { tools: [
-        { name: "create_monitor", description: "mutates monitors", inputSchema: { type: "object" } },
-        { name: "logs", description: "read logs", inputSchema: { type: "object" } },
-      ] };
-    },
-    async callTool() {
-      calls++;
-      return { content: [{ type: "image", data: "secret-binary" }, { type: "text", text: "visible" }] };
-    },
-  };
-  setDatadogClientForTesting(client as any);
-  const provider = getDatadogCapabilityProvider();
-  const ctx = { cwd: process.cwd() } as any;
-  await assert.rejects(provider.call("datadog_create_monitor", {}, ctx), /approved read-only/);
-  const result = await provider.call("datadog_logs", {}, ctx) as any;
-  assert.match(result.content[0].text, /visible/);
-  assert.doesNotMatch(result.content[0].text, /secret-binary/);
-  assert.equal(calls, 1);
-  setDatadogClientForTesting(undefined);
-});
-
-test("Datadog tool calls reject a late result from an invalidated client", async () => {
-  let release!: () => void;
-  const callResult = new Promise<any>((resolve) => { release = () => resolve({ content: [{ type: "text", text: "stale" }] }); });
-  const fakeClient = {
-    async listTools() { return { tools: [{ name: "logs", description: "logs", inputSchema: { type: "object" } }] }; },
-    async callTool() { return callResult; },
-  };
-  const definitions: any[] = [];
-  const pi = {
-    getActiveTools: () => ["read"],
-    setActiveTools: () => undefined,
-    registerTool: (definition: any) => definitions.push(definition),
-  };
-  setDatadogClientForTesting(fakeClient as any);
-  await discoverTools(fakeClient as any, pi as any);
-  const pending = definitions[0].execute("call", {}, new AbortController().signal, undefined, {});
-  setDatadogClientForTesting(undefined);
-  release();
-  await assert.rejects(pending, /superseded|shut down/i);
+test("native Datadog tool names reject mutation-shaped operations in read-only modes", () => {
+  assert.equal(isDatadogReadOnlyToolName("mcp__datadog__logs"), true);
+  assert.equal(isDatadogReadOnlyToolName("mcp__datadog__error_tracking"), true);
+  assert.equal(isDatadogReadOnlyToolName("mcp__datadog__create_monitor"), false);
+  assert.equal(isDatadogReadOnlyToolName("mcp__other__logs"), false);
 });

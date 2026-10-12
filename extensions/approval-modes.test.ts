@@ -13,7 +13,7 @@ test("Plan mode bash safety rejects mutating Git commands and shell composition"
 });
 
 test("Plan and Review modes keep context tools while filtering visual side effects", () => {
-	for (const tool of ["notes_list", "notes_read", "fovea_focus", "datadog_search_tools", "scheduled_task_list", "repo_search"]) {
+	for (const tool of ["notes_list", "notes_read", "fovea_focus", "tool_search", "scheduled_task_list", "repo_search"]) {
 		assert.equal(PLAN_TOOLS.has(tool), true, tool);
 	}
 	for (const tool of ["notes_write", "notes_transfer", "notes_save", "notes_git", "memory", "herdr_shell", "scheduled_task_create", "scheduled_task_delete", "scheduled_task_run_now"]) {
@@ -24,8 +24,8 @@ test("Plan and Review modes keep context tools while filtering visual side effec
 	assert.equal(REVIEW_TOOLS.has("visualize"), true);
 	assert.equal(REVIEW_TOOLS.has("plan_board"), true);
 	assert.equal(PLAN_TOOLS.has("plan_board"), true);
-	assert.equal(isPlanModeToolAllowed("datadog_logs"), true);
-	assert.equal(isPlanModeToolAllowed("datadog_create_monitor"), false);
+	assert.equal(isPlanModeToolAllowed("mcp__datadog__logs"), true);
+	assert.equal(isPlanModeToolAllowed("mcp__datadog__create_monitor"), false);
 	assert.equal(isPlanModeToolAllowed("write"), false);
 	assert.equal(isPlanModeVisualizationAllowed({ action: "preview", format: "mermaid", source: "graph TD\nA" }), true);
 	assert.equal(isReviewModeVisualizationAllowed({ action: "preview", format: "mermaid", source: "graph TD\nA" }), true);
@@ -45,7 +45,7 @@ test("Plan and Review modes keep context tools while filtering visual side effec
 	assert.equal(isReviewModeToolAllowed("visualize", { action: "viewer", format: "excalidraw", nodes: [{ id: "a", label: "A" }] }), true);
 	assert.equal(isReviewModeToolAllowed("visualize", { action: "artifact" }), false);
 	assert.equal(isPlanModeToolAllowed("visualize"), false);
-	const available = ["read", "plan", "repo_search", "visualize", "notes_list", "memory", "fovea_focus", "datadog_logs"];
+	const available = ["read", "plan", "repo_search", "visualize", "notes_list", "memory", "fovea_focus", "mcp__datadog__logs"];
 	assert.deepEqual(readOnlyToolNames("review", available), ["read", "plan", "repo_search", "visualize"]);
 	assert.deepEqual(readOnlyToolNames("plan", available), ["read", "plan", "repo_search", "visualize", "notes_list", "fovea_focus"]);
 });
@@ -53,18 +53,18 @@ test("Plan and Review modes keep context tools while filtering visual side effec
 test("leaving read-only mode preserves dynamically activated tools", () => {
 	assert.deepEqual(
 		restoreActiveTools(
-			["read", "notes_admin_tools", "datadog_search_tools"],
-			["read", "grep", "plan", "notes_list", "datadog_logs", "notes_list"],
+			["read", "notes_admin_tools", "tool_search"],
+			["read", "grep", "plan", "notes_list", "mcp__datadog__logs", "notes_list"],
 		),
-		["read", "notes_admin_tools", "datadog_search_tools", "notes_list", "datadog_logs"],
+		["read", "notes_admin_tools", "tool_search", "notes_list", "mcp__datadog__logs"],
 	);
 	assert.deepEqual(
 		restoreActiveTools(
 			["read"],
-			["read", "notes_list", "fovea_focus", "datadog_logs"],
+			["read", "notes_list", "fovea_focus", "mcp__datadog__logs"],
 			PLAN_TOOLS,
 		),
-		["read", "datadog_logs"],
+		["read", "mcp__datadog__logs"],
 	);
 });
 
