@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readHerdrBindings, UnsupportedHerdrStateVersionError, updateHerdrBindings } from "./herdr-state.ts";
 
-function binding(key: string, role: "generic-shell" | "notes-viewer" = "generic-shell") {
+function binding(key: string, role: "generic-shell" | "notes-viewer" | "plan-board" = "generic-shell") {
   return { key, role, workspaceId: "w1", parentTabId: "w1:t1", paneId: `w1:${key}`, terminalId: `term-${key}`, cwd: "/repo", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
 }
 
@@ -16,10 +16,13 @@ test("migrates v2 shell records and preserves explicit role separation", async (
     await writeFile(file, JSON.stringify({ version: 2, bindings: [{ ...binding("old"), role: undefined }] }));
     const bindings = await readHerdrBindings(file);
     assert.equal(bindings.get("generic-shell|old")?.role, "generic-shell");
-    await updateHerdrBindings((records) => { records.set("notes", binding("notes", "notes-viewer")); }, file);
+    await updateHerdrBindings((records) => {
+      records.set("notes", binding("notes", "notes-viewer"));
+      records.set("board", binding("board", "plan-board"));
+    }, file);
     const saved = JSON.parse(await readFile(file, "utf8"));
     assert.equal(saved.version, 3);
-    assert.deepEqual(saved.bindings.map((entry: { role: string }) => entry.role).sort(), ["generic-shell", "notes-viewer"]);
+    assert.deepEqual(saved.bindings.map((entry: { role: string }) => entry.role).sort(), ["generic-shell", "notes-viewer", "plan-board"]);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

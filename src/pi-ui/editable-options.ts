@@ -1,6 +1,6 @@
 import { Input, Key, matchesKey, ScrollView, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
-import { EditableOptionState } from "./editable-option-state.js";
-import { constrainLines, renderDivider, type PiUiTheme } from "./rendering.js";
+import { EditableOptionState } from "./editable-option-state.ts";
+import { constrainLines, renderDivider, type PiUiTheme } from "./rendering.ts";
 
 export interface EditableOption {
 	key: string;

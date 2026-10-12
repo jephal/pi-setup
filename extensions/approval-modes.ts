@@ -1,14 +1,15 @@
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { OTHER_OPTION_LABEL, createEditableOptionsComponent } from "../src/pi-ui/index.js";
+import { OTHER_OPTION_LABEL, createEditableOptionsComponent } from "../src/pi-ui/index.ts";
 import { Markdown } from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { checklistMarkdown, PLAN_MODE_TOOL_ACCESS, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
-import { isPlanModeToolAllowed, isSafePlanBash, PLAN_TOOLS, readOnlyToolNames, REVIEW_TOOLS, restoreActiveTools } from "./approval-tools.ts";
+import { checklistMarkdown, PLAN_BOARD_GUIDANCE, PLAN_MODE_TOOL_ACCESS, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
+import { clearedPlanBoardSnapshot, projectPlanBoard } from "./plan-board.ts";
+import { isPlanModeToolAllowed, isReviewModeToolAllowed, isSafePlanBash, PLAN_TOOLS, readOnlyToolNames, REVIEW_TOOLS, restoreActiveTools } from "./approval-tools.ts";
 import { withHerdrBlock } from "./herdr-blocking.ts";
 
 const MODES = ["manual", "approve", "auto", "review", "plan"] as const;
@@ -189,6 +190,11 @@ function allCheckpointsComplete(plan: LocalPlan): boolean {
 	return plan.steps.length > 0 && plan.steps.every(isCompleted);
 }
 
+function emitLocalPlanBoard(pi: ExtensionAPI, ctx: ExtensionContext, plan: LocalPlan | undefined): void {
+	const snapshot = plan ? projectPlanBoard(plan as any) : clearedPlanBoardSnapshot({ name: "Plan Board", repository: "project", branch: "unknown", root: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() });
+	pi.events.emit("plan-board:plan", { cwd: ctx.cwd, snapshot });
+}
+
 function updateCheckpointWidget(ctx: ExtensionContext, plan: LocalPlan | undefined): void {
 	if (!ctx.hasUI) return;
 	ctx.ui.setWidget("plan-checkpoints", plan?.execution?.active && plan.steps.length ? checkpointWidgetLines(plan) : undefined, { placement: "aboveEditor" });
@@ -237,6 +243,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 
 	let mode: ApprovalMode = "auto";
 	let activeExecutionPlan: LocalPlan | undefined;
+	let currentPlanIdentity: LocalPlanIdentity | undefined;
 	const ownsPlanTool = (globalThis as Record<string, unknown>)[PLAN_TOOL_MARKER] !== "plan";
 	let modeBeforePlan: ApprovalMode = "auto";
 	let toolsBeforePlan: string[] | undefined;
@@ -275,6 +282,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				await clearLocalPlan(identity);
 				activeExecutionPlan = undefined;
 				updateCheckpointWidget(ctx, undefined);
+				emitLocalPlanBoard(pi, ctx, undefined);
 				return { content: [{ type: "text", text: `Cleared the active plan for ${identity.branch}.` }], details: { cleared: true, identity } };
 			}
 			if (params.action === "status") {
@@ -298,6 +306,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 					execution: previous?.execution?.active ? previous.execution : undefined,
 				};
 				const filePath = await saveLocalPlan(plan);
+				emitLocalPlanBoard(pi, ctx, plan);
 				if (plan.execution?.active) {
 					activeExecutionPlan = plan;
 					updateCheckpointWidget(ctx, plan);
@@ -316,6 +325,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			};
 			for (;;) {
 				const filePath = await saveLocalPlan(plan);
+				emitLocalPlanBoard(pi, ctx, plan);
 				if (plan.execution?.active && mode !== "plan") {
 					activeExecutionPlan = plan;
 					updateCheckpointWidget(ctx, plan);
@@ -337,7 +347,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				}
 				if (review.key === "edit-plan") {
 					const edited = await withHerdrBlock(pi, "Waiting for plan edits", () => ctx.ui.editor("Edit plan", plan.content));
-					if (edited?.trim()) { plan = { ...plan, content: edited, updatedAt: new Date().toISOString() }; }
+					if (edited?.trim()) { plan = { ...plan, content: edited, updatedAt: new Date().toISOString() }; emitLocalPlanBoard(pi, ctx, plan); }
 					continue;
 				}
 				if (review.key === "feedback") {
@@ -351,12 +361,45 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				plan.execution = plan.steps.length ? { active: true, startedAt: new Date().toISOString() } : undefined;
 				activeExecutionPlan = plan;
 				await saveLocalPlan(plan);
+				emitLocalPlanBoard(pi, ctx, plan);
 				updateCheckpointWidget(ctx, plan);
 				ctx.ui.notify(announcement, "info");
 				pi.events.emit("approval-mode:set", { mode: nextMode });
 				if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
 				return { content: [{ type: "text", text: `[PLAN MODE EXITED]\n${announcement}\nThe plan is approved. Begin the implementation now; do not continue planning.` }], details: { plan, choice: review.key, nextMode, executionReady: true, planModeExited: true } };
 			}
+		},
+	});
+	const boardRequest = async <T extends Record<string, unknown>>(event: string, value: T): Promise<Record<string, unknown>> => {
+		if (process.env.HERDR_ENV !== "1") throw new Error("Plan Board requires Pi to run inside Herdr (HERDR_ENV=1).");
+		return await new Promise<Record<string, unknown>>((resolve, reject) => {
+			pi.events.emit(event, { ...value, respond: (result: { ok: boolean; error?: string; [key: string]: unknown }) => result.ok ? resolve(result) : reject(new Error(result.error || "Plan Board operation failed.")) });
+		});
+	};
+	pi.registerTool({
+		name: "plan_board",
+		label: "Plan Board",
+		description: "Open, refresh, inspect, or close the dedicated derived Plan Board pane. It never edits the saved plan and never accepts shell commands.",
+		promptSnippet: "Display the current plan in the dedicated Herdr Plan Board",
+		promptGuidelines: [PLAN_BOARD_GUIDANCE],
+		parameters: Type.Object({ action: Type.Union([Type.Literal("open"), Type.Literal("update"), Type.Literal("status"), Type.Literal("close")]) }),
+		renderCall(params, _theme, _context) { return new Markdown(`Plan Board · ${params.action}`, 1, 0, getMarkdownTheme()); },
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const identity = await planIdentity(pi, ctx);
+			if (params.action === "close") {
+				const result = await boardRequest("herdr:close-plan-board", { role: "plan-board", cwd: ctx.cwd });
+				return { content: [{ type: "text", text: `Plan Board closed${result.closed ? "." : " (no pane was closed)."}` }], details: { action: params.action, ...result } };
+			}
+			if (params.action === "status") {
+				const result = await boardRequest("herdr:status-plan-board", { role: "plan-board", cwd: ctx.cwd });
+				return { content: [{ type: "text", text: `Plan Board: ${result.status || "unknown"}${result.revision ? ` · revision ${result.revision}` : ""}.` }], details: { action: params.action, ...result } };
+			}
+			const plan = await loadLocalPlan(identity);
+			if (!plan) throw new Error("No active plan exists for this branch; create the authoritative Pi plan first.");
+			const snapshot = projectPlanBoard(plan as any);
+			const event = params.action === "open" ? "herdr:open-plan-board" : "herdr:update-plan-board";
+			const result = await boardRequest(event, { role: "plan-board", cwd: ctx.cwd, socket: "", snapshot });
+			return { content: [{ type: "text", text: `Plan Board ${params.action === "open" ? "opened" : "updated"}${result.revision ? ` · revision ${result.revision}` : ""}.` }], details: { action: params.action, status: "ready", ...result } };
 		},
 	});
 	(globalThis as Record<string, unknown>)[PLAN_TOOL_MARKER] = "approval";
@@ -524,7 +567,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		if (HITL_TOOLS.has(event.toolName) || mode === "auto") return;
 
 		if (isReadOnlyMode(mode)) {
-			const allowed = mode === "plan" ? isPlanModeToolAllowed(event.toolName) : REVIEW_TOOLS.has(event.toolName);
+			const allowed = mode === "plan" ? isPlanModeToolAllowed(event.toolName, event.input) : isReviewModeToolAllowed(event.toolName, event.input);
 			if (!allowed) {
 				return { block: true, reason: `${MODE_LABELS[mode]} mode is read-only: this tool is disabled.` };
 			}
@@ -594,7 +637,19 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		};
 	});
 
-	pi.on("before_agent_start", async () => {
+	pi.on("before_agent_start", async (_event, ctx) => {
+		if (ownsPlanTool) {
+			const nextIdentity = await planIdentity(pi, ctx);
+			if (!currentPlanIdentity || currentPlanIdentity.root !== nextIdentity.root || currentPlanIdentity.branch !== nextIdentity.branch || currentPlanIdentity.sessionId !== nextIdentity.sessionId) {
+				currentPlanIdentity = nextIdentity;
+				const loadedPlan = await loadLocalPlan(nextIdentity);
+				activeExecutionPlan = loadedPlan?.execution?.active ? loadedPlan : undefined;
+				updateCheckpointWidget(ctx, activeExecutionPlan);
+				// Branch/worktree changes replace the board even when the new scope
+				// has only a draft or no plan.
+				emitLocalPlanBoard(pi, ctx, loadedPlan);
+			}
+		}
 		const instructions: Record<ApprovalMode, string> = {
 			manual: "Every tool call requires user approval, except ask_questions which is already human-in-the-loop. Do not assume a tool call is allowed.",
 			approve: "Read tools, edit, and write may run directly. Every bash call requires user approval. ask_questions is already human-in-the-loop and is not gated twice.",
@@ -636,9 +691,12 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		updateUi(ctx);
 		if (!ownsPlanTool) return;
 		const identity = await planIdentity(pi, ctx);
-		activeExecutionPlan = await loadLocalPlan(identity);
-		if (!activeExecutionPlan?.execution?.active) activeExecutionPlan = undefined;
+		currentPlanIdentity = identity;
+		const loadedPlan = await loadLocalPlan(identity);
+		activeExecutionPlan = loadedPlan?.execution?.active ? loadedPlan : undefined;
 		updateCheckpointWidget(ctx, activeExecutionPlan);
+		// Reconcile every loaded state so a reload cannot display a prior branch.
+		emitLocalPlanBoard(pi, ctx, loadedPlan);
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
@@ -650,12 +708,14 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		if (allCheckpointsComplete(plan)) {
 			plan.execution = { ...plan.execution, active: false, completedAt: plan.updatedAt };
 			await saveLocalPlan(plan);
+			emitLocalPlanBoard(pi, ctx, plan);
 			activeExecutionPlan = undefined;
 			updateCheckpointWidget(ctx, undefined);
 			ctx.ui.notify(`All task checkpoints complete for ${plan.name}.`, "info");
 			return;
 		}
 		await saveLocalPlan(plan);
+		emitLocalPlanBoard(pi, ctx, plan);
 		updateCheckpointWidget(ctx, plan);
 	});
 }

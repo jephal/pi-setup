@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import net from "node:net";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 import { formatSize, truncateTail, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
@@ -10,6 +12,9 @@ import {
   isNotFound, parseVersion, supportsTabShell, type HerdrClient,
 } from "./herdr-client.ts";
 import { HerdrEventSubscriber, type HerdrEventEnvelope } from "./herdr-events.ts";
+import { sendTerminalViewerCommand, terminalViewerCommand, waitForTerminalViewerSocket } from "./excalidraw-terminal-viewer.ts";
+import { createPlanBoardEndpoint, planBoardCommand, sendPlanBoardCommand, waitForPlanBoardSocket } from "./plan-board-process.ts";
+import { validatePlanBoardSnapshot, type PlanBoardSnapshot } from "./plan-board.ts";
 import {
   readHerdrBindings, removeHerdrBinding, upsertHerdrBinding, updateHerdrBindings,
   type HerdrBinding, type HerdrBindingRole,
@@ -24,6 +29,12 @@ const READY_POLL_MS = 100;
 const NOTES_READY_TIMEOUT_MS = 5_000;
 const NOTES_ROLE: HerdrBindingRole = "notes-viewer";
 const SHELL_ROLE: HerdrBindingRole = "generic-shell";
+export const VISUALIZATION_VIEWER_ROLE: HerdrBindingRole = "visualization-viewer";
+const TERMINAL_VIEWER_READY_TIMEOUT_MS = 6_000;
+const TERMINAL_VIEWER_ENTRY = fileURLToPath(new URL("./excalidraw-terminal-viewer.ts", import.meta.url));
+export const PLAN_BOARD_ROLE: HerdrBindingRole = "plan-board";
+const PLAN_BOARD_READY_TIMEOUT_MS = 6_000;
+const PLAN_BOARD_ENTRY = fileURLToPath(new URL("./plan-board-process.ts", import.meta.url));
 
 const HerdrShellParameters = Type.Object({
   action: StringEnum(["open", "run", "read_output", "status", "close"] as const, { description: "Operation to perform in the managed Herdr side-by-side pane" }),
@@ -42,9 +53,45 @@ interface HerdrNotesViewerRequest {
   signal?: AbortSignal;
   respond: (result: { ok: boolean; error?: string; binding?: HerdrBinding; existing?: boolean }) => void;
 }
+export interface HerdrTerminalViewerRequest {
+  role: typeof VISUALIZATION_VIEWER_ROLE;
+  cwd: string;
+  socket: string;
+  scene: Record<string, unknown>;
+  signal?: AbortSignal;
+  respond: (result: { ok: boolean; error?: string; binding?: HerdrBinding; existing?: boolean; revision?: number }) => void;
+}
+interface HerdrTerminalViewerStatusRequest {
+  role: typeof VISUALIZATION_VIEWER_ROLE;
+  cwd: string;
+  signal?: AbortSignal;
+  respond: (result: { ok: boolean; error?: string; status?: "ready" | "closed"; binding?: HerdrBinding; revision?: number }) => void;
+}
+export interface HerdrPlanBoardRequest {
+  role: typeof PLAN_BOARD_ROLE;
+  cwd: string;
+  socket: string;
+  snapshot: PlanBoardSnapshot;
+  signal?: AbortSignal;
+  respond: (result: { ok: boolean; error?: string; binding?: HerdrBinding; existing?: boolean; revision?: number }) => void;
+}
+interface HerdrPlanBoardStatusRequest {
+  role: typeof PLAN_BOARD_ROLE;
+  cwd: string;
+  signal?: AbortSignal;
+  respond: (result: { ok: boolean; error?: string; status?: "ready" | "closed"; binding?: HerdrBinding; revision?: number }) => void;
+}
 interface PaneInspection { pane: Record<string, unknown>; terminalId?: string; shellReady: boolean; }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+
+/** Carry an explicit scene only across updates in the same Plan Board scope. */
+export function preservePlanBoardScene(current: PlanBoardSnapshot | undefined, next: PlanBoardSnapshot): PlanBoardSnapshot {
+  if (!current || current.status === "cleared" || next.status === "cleared" || next.scene) return next;
+  const sameScope = ["repository", "branch", "root", "sessionId"].every((key) => current.identity[key as keyof typeof current.identity] === next.identity[key as keyof typeof next.identity]);
+  return sameScope && current.scene ? { ...next, scene: current.scene } : next;
+}
+
 function describeCommand(command: string | undefined): string {
   if (!command) return "interactive shell";
   const firstLine = command.split(/\r?\n/, 1)[0] ?? command;
@@ -150,6 +197,28 @@ function processContainsNvim(info: Record<string, unknown>, socket: string): boo
   });
 }
 
+export function processContainsTerminalViewer(info: Record<string, unknown>, socket: string, executable = process.execPath, entry = TERMINAL_VIEWER_ENTRY): boolean {
+  const processes = info.foreground_processes;
+  if (!Array.isArray(processes)) return false;
+  return processes.some((process) => {
+    if (!isRecord(process) || !Array.isArray(process.argv)) return false;
+    const argv = process.argv.filter((part): part is string => typeof part === "string");
+    // Do not accept a look-alike script or a shell command containing the
+    // viewer name. Herdr ownership requires the exact launch argv we emit.
+    return argv.length === 5 && argv[0] === executable && argv[1] === "--experimental-strip-types" && argv[2] === entry && argv[3] === "--socket" && argv[4] === socket;
+  });
+}
+
+export function processContainsPlanBoard(info: Record<string, unknown>, socket: string, executable = process.execPath, entry = PLAN_BOARD_ENTRY): boolean {
+  const processes = info.foreground_processes;
+  if (!Array.isArray(processes)) return false;
+  return processes.some((process) => {
+    if (!isRecord(process) || !Array.isArray(process.argv)) return false;
+    const argv = process.argv.filter((part): part is string => typeof part === "string");
+    return argv.length === 5 && argv[0] === executable && argv[1] === "--experimental-strip-types" && argv[2] === entry && argv[3] === "--socket" && argv[4] === socket;
+  });
+}
+
 async function paneExists(client: HerdrClient, paneId: string, signal?: AbortSignal): Promise<boolean> {
   try { return extractPaneId(paneRecord(await client.run(["pane", "get", paneId], { timeout: 5_000, signal }))) === paneId; }
   catch (error) { if (isNotFound(error)) return false; throw error; }
@@ -231,7 +300,7 @@ async function createOwnedPane(client: HerdrClient, context: HerdrContext, cwd: 
     role,
     workspaceId: created.workspaceId,
     parentTabId: context.parentTabId,
-    ...(role === SHELL_ROLE && context.paneId ? { ownerPaneId: context.paneId } : {}),
+    ...((role === SHELL_ROLE || role === VISUALIZATION_VIEWER_ROLE || role === PLAN_BOARD_ROLE) && context.paneId ? { ownerPaneId: context.paneId } : {}),
     paneId: created.paneId,
     terminalId: created.terminalId,
     cwd,
@@ -408,6 +477,264 @@ async function closeBinding(client: HerdrClient, binding: HerdrBinding, signal?:
   catch (error) { if (!isNotFound(error)) throw error; }
   await removeHerdrBinding(binding.key, binding.paneId);
 }
+
+async function viewerSocketIsLive(socket: string): Promise<boolean> {
+  try {
+    await sendTerminalViewerCommand(socket, { op: "ping" }, 500);
+    return true;
+  } catch { return false; }
+}
+
+async function openTerminalViewer(client: HerdrClient, request: HerdrTerminalViewerRequest): Promise<{ binding: HerdrBinding; existing: boolean; revision: number }> {
+  throwIfAborted(request.signal);
+  const context = await getHerdrContext(client);
+  const key = bindingKey(context, request.cwd, VISUALIZATION_VIEWER_ROLE);
+  const saved = (await readHerdrBindings()).get(key);
+  if (saved?.role === VISUALIZATION_VIEWER_ROLE) {
+    const inspection = await inspectBinding(client, saved, request.signal);
+    if (inspection) {
+      const info = await getPaneProcessInfo(client, saved.paneId, request.signal);
+      if (saved.socket && processContainsTerminalViewer(info ?? {}, saved.socket)) {
+        // Existing viewers are already initialized. Read their revision first,
+        // then use the normal stale-update fence; set_scene is initial-only.
+        try {
+          const current = await sendTerminalViewerCommand(saved.socket, { op: "get" });
+          if (typeof current.revision !== "number" || !Number.isSafeInteger(current.revision) || current.revision < 1) throw new Error("Managed visualization viewer returned an invalid revision.");
+          const updated = await sendTerminalViewerCommand(saved.socket, { op: "update", revision: current.revision, scene: request.scene });
+          return { binding: saved, existing: true, revision: updated.revision ?? current.revision + 1 };
+        } catch {
+          // The exact viewer can outlive its socket (listener failure, deleted
+          // socket, or a replaced path). Reverify before reclaiming the pane so
+          // a human takeover is never closed, then start the replacement with
+          // this scene as revision one.
+          const reverified = await getPaneProcessInfo(client, saved.paneId, request.signal);
+          if (saved.socket && processContainsTerminalViewer(reverified ?? {}, saved.socket)) {
+            await closeBinding(client, saved, request.signal);
+          } else {
+            await removeHerdrBinding(key, saved.paneId);
+          }
+        }
+      } else {
+        const socketLive = saved.socket ? await viewerSocketIsLive(saved.socket) : false;
+        if (inspection.shellReady && !socketLive) {
+          // q leaves a verified dedicated pane at its shell prompt. It is safe to
+          // reclaim that pane; a non-shell foreground process is never touched.
+          await closeBinding(client, saved, request.signal);
+        } else {
+          // The recorded pane is still live but no longer runs our exact viewer
+          // (owner loss, q/restart race, or human takeover). Never send input to
+          // it; retire only our binding and create a fresh dedicated pane.
+          await removeHerdrBinding(key, saved.paneId);
+        }
+      }
+    } else {
+      // A stale topology binding is not permission to adopt a replacement or a
+      // generic/Notes pane. Leave any live pane untouched and create our own.
+      await removeHerdrBinding(key, saved.paneId);
+    }
+  }
+  const binding = await createOwnedPane(client, context, request.cwd, VISUALIZATION_VIEWER_ROLE, key, request.signal);
+  const adopted = { ...binding, socket: request.socket, updatedAt: new Date().toISOString() };
+  try {
+    // This command is assembled from fixed executable/script arguments. It is
+    // never taken from model input; the socket is validated and shell-quoted.
+    await client.run(["pane", "run", binding.paneId, terminalViewerCommand(request.socket)], { timeout: COMMAND_TIMEOUT_MS, signal: request.signal });
+    await waitForTerminalViewerSocket(request.socket, TERMINAL_VIEWER_READY_TIMEOUT_MS, request.signal);
+    await sendTerminalViewerCommand(request.socket, { op: "set_scene", revision: 1, scene: request.scene });
+    await upsertHerdrBinding(adopted);
+    return { binding: adopted, existing: false, revision: 1 };
+  } catch (error) {
+    try { await closeBinding(client, binding); }
+    catch (closeError) { throw new AggregateError([error, closeError], `New visualization viewer pane ${binding.paneId} failed to launch and could not be closed.`); }
+    throw error;
+  }
+}
+
+async function statusTerminalViewer(client: HerdrClient, request: HerdrTerminalViewerStatusRequest): Promise<{ status: "ready" | "closed"; binding?: HerdrBinding; revision?: number }> {
+  throwIfAborted(request.signal);
+  const context = await getHerdrContext(client);
+  const key = bindingKey(context, request.cwd, VISUALIZATION_VIEWER_ROLE);
+  const binding = (await readHerdrBindings()).get(key);
+  if (!binding || binding.role !== VISUALIZATION_VIEWER_ROLE) return { status: "closed" };
+  const inspection = await inspectBinding(client, binding, request.signal);
+  if (!inspection) {
+    if (!await paneExists(client, binding.paneId, request.signal)) await removeHerdrBinding(key, binding.paneId);
+    return { status: "closed", binding };
+  }
+  const info = await getPaneProcessInfo(client, binding.paneId, request.signal);
+  if (!binding.socket || !processContainsTerminalViewer(info ?? {}, binding.socket)) return { status: "closed", binding };
+  try {
+    const current = await sendTerminalViewerCommand(binding.socket, { op: "ping" });
+    return { status: "ready", binding, revision: current.revision };
+  } catch { return { status: "closed", binding }; }
+}
+
+async function closeTerminalViewer(client: HerdrClient, request: { cwd: string; socket: string; signal?: AbortSignal }): Promise<{ closed: boolean; binding?: HerdrBinding }> {
+  const context = await getHerdrContext(client);
+  const key = bindingKey(context, request.cwd, VISUALIZATION_VIEWER_ROLE);
+  const binding = (await readHerdrBindings()).get(key);
+  if (!binding || binding.role !== VISUALIZATION_VIEWER_ROLE) return { closed: false };
+  const inspection = await inspectBinding(client, binding, request.signal);
+  if (!inspection) { if (!(await paneExists(client, binding.paneId, request.signal))) await removeHerdrBinding(key, binding.paneId); return { closed: false, binding }; }
+  const info = await getPaneProcessInfo(client, binding.paneId, request.signal);
+  if (binding.socket && processContainsTerminalViewer(info ?? {}, binding.socket)) {
+    await sendTerminalViewerCommand(binding.socket, { op: "close" }).catch(() => undefined);
+    await closeBinding(client, binding, request.signal);
+    return { closed: true, binding };
+  }
+  // The viewer may have exited through q. Reclaim only a verified pane that is
+  // back at its shell prompt and whose private socket is no longer responsive.
+  if (inspection.shellReady && (!binding.socket || !await viewerSocketIsLive(binding.socket))) {
+    await closeBinding(client, binding, request.signal);
+    return { closed: true, binding };
+  }
+  // Do not close a pane that may now belong to a human or another tool. Retire
+  // only our stale record so a future open creates a dedicated replacement.
+  await removeHerdrBinding(key, binding.paneId);
+  return { closed: false, binding };
+}
+
+async function cleanupGeneratedPlanBoardSocket(socket: string): Promise<void> {
+  const directory = dirname(socket);
+  if (dirname(directory) !== tmpdir() || !basename(directory).startsWith("pi-plan-board-")) return;
+  await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined);
+}
+
+async function openPlanBoard(client: HerdrClient, request: HerdrPlanBoardRequest): Promise<{ binding: HerdrBinding; existing: boolean; revision: number }> {
+  throwIfAborted(request.signal);
+  const snapshot = validatePlanBoardSnapshot(request.snapshot);
+  const context = await getHerdrContext(client);
+  const key = bindingKey(context, request.cwd, PLAN_BOARD_ROLE);
+  const saved = (await readHerdrBindings()).get(key);
+  if (saved?.role === PLAN_BOARD_ROLE) {
+    const inspection = await inspectBinding(client, saved, request.signal);
+    if (inspection && saved.socket && processContainsPlanBoard(await getPaneProcessInfo(client, saved.paneId, request.signal) ?? {}, saved.socket)) {
+      try {
+        const current = await sendPlanBoardCommand(saved.socket, { op: "get" });
+        if (typeof current.revision !== "number" || current.revision < 1) throw new Error("Managed Plan Board returned an invalid revision.");
+        const nextSnapshot = validatePlanBoardSnapshot(preservePlanBoardScene(current.snapshot, snapshot));
+        const updated = await sendPlanBoardCommand(saved.socket, { op: "update", revision: current.revision, snapshot: nextSnapshot });
+        const binding = { ...saved, updatedAt: new Date().toISOString() };
+        await upsertHerdrBinding(binding);
+        return { binding, existing: true, revision: updated.revision ?? current.revision + 1 };
+      } catch {
+        const info = await getPaneProcessInfo(client, saved.paneId, request.signal);
+        if (saved.socket && processContainsPlanBoard(info ?? {}, saved.socket)) {
+          await closeBinding(client, saved, request.signal);
+          await cleanupGeneratedPlanBoardSocket(saved.socket);
+        } else await removeHerdrBinding(key, saved.paneId);
+      }
+    } else if (inspection) {
+      if (inspection.shellReady) {
+        await closeBinding(client, saved, request.signal);
+        if (saved.socket) await cleanupGeneratedPlanBoardSocket(saved.socket);
+      } else await removeHerdrBinding(key, saved.paneId);
+    } else {
+      const paneStillExists = await paneExists(client, saved.paneId, request.signal);
+      await removeHerdrBinding(key, saved.paneId);
+      if (!paneStillExists && saved.socket) await cleanupGeneratedPlanBoardSocket(saved.socket);
+    }
+  }
+  let endpoint: Awaited<ReturnType<typeof createPlanBoardEndpoint>> | undefined;
+  let socket = request.socket;
+  let binding: HerdrBinding | undefined;
+  try {
+    // Endpoint creation and pane creation share one cleanup boundary. A pane
+    // creation failure must not strand the private directory under /tmp.
+    endpoint = request.socket ? undefined : await createPlanBoardEndpoint();
+    socket = endpoint?.socket ?? request.socket;
+    binding = await createOwnedPane(client, context, request.cwd, PLAN_BOARD_ROLE, key, request.signal);
+    const adopted = { ...binding, socket, updatedAt: new Date().toISOString() };
+    await client.run(["pane", "run", binding.paneId, planBoardCommand(socket)], { timeout: COMMAND_TIMEOUT_MS, signal: request.signal });
+    await waitForPlanBoardSocket(socket, PLAN_BOARD_READY_TIMEOUT_MS, request.signal);
+    await sendPlanBoardCommand(socket, { op: "set_snapshot", revision: 1, snapshot });
+    await upsertHerdrBinding(adopted);
+    return { binding: adopted, existing: false, revision: 1 };
+  } catch (error) {
+    if (binding) {
+      try { await closeBinding(client, binding); }
+      catch (closeError) {
+        await endpoint?.cleanup();
+        throw new AggregateError([error, closeError], `New Plan Board pane ${binding.paneId} failed to launch and could not be closed.`);
+      }
+    }
+    await endpoint?.cleanup();
+    throw error;
+  }
+}
+
+async function updatePlanBoard(client: HerdrClient, request: HerdrPlanBoardRequest): Promise<{ binding: HerdrBinding; revision: number; recovered?: boolean }> {
+  const snapshot = validatePlanBoardSnapshot(request.snapshot);
+  const context = await getHerdrContext(client);
+  const key = bindingKey(context, request.cwd, PLAN_BOARD_ROLE);
+  const binding = (await readHerdrBindings()).get(key);
+  if (!binding || binding.role !== PLAN_BOARD_ROLE || !binding.socket) throw new Error("No active Plan Board exists for this scope.");
+  const inspection = await inspectBinding(client, binding, request.signal);
+  const info = inspection ? await getPaneProcessInfo(client, binding.paneId, request.signal) : undefined;
+  if (!inspection || !processContainsPlanBoard(info ?? {}, binding.socket)) {
+    // Cleanup is safe only after the pane is gone or a verified shell has been
+    // closed. A process-identity mismatch may be a human takeover; retain its
+    // socket directory until that process is independently terminated.
+    if (!inspection) {
+      const paneStillExists = await paneExists(client, binding.paneId, request.signal);
+      await removeHerdrBinding(key, binding.paneId);
+      if (!paneStillExists) await cleanupGeneratedPlanBoardSocket(binding.socket);
+    } else if (inspection.shellReady) {
+      await closeBinding(client, binding, request.signal);
+      await cleanupGeneratedPlanBoardSocket(binding.socket);
+    } else {
+      await removeHerdrBinding(key, binding.paneId);
+    }
+    const recovered = await openPlanBoard(client, { ...request, socket: "" });
+    return { binding: recovered.binding, revision: recovered.revision, recovered: true };
+  }
+  try {
+    const current = await sendPlanBoardCommand(binding.socket, { op: "get" });
+    if (typeof current.revision !== "number" || current.revision < 1) throw new Error("Managed Plan Board returned an invalid revision.");
+    const nextSnapshot = validatePlanBoardSnapshot(preservePlanBoardScene(current.snapshot, snapshot));
+    const updated = await sendPlanBoardCommand(binding.socket, { op: "update", revision: current.revision, snapshot: nextSnapshot });
+    const next = { ...binding, updatedAt: new Date().toISOString() };
+    await upsertHerdrBinding(next);
+    return { binding: next, revision: updated.revision ?? current.revision + 1 };
+  } catch {
+    const recovered = await openPlanBoard(client, { ...request, socket: "" });
+    return { binding: recovered.binding, revision: recovered.revision, recovered: true };
+  }
+}
+
+async function statusPlanBoard(client: HerdrClient, request: HerdrPlanBoardStatusRequest): Promise<{ status: "ready" | "closed"; binding?: HerdrBinding; revision?: number }> {
+  const context = await getHerdrContext(client);
+  const key = bindingKey(context, request.cwd, PLAN_BOARD_ROLE);
+  const binding = (await readHerdrBindings()).get(key);
+  if (!binding || binding.role !== PLAN_BOARD_ROLE || !binding.socket) return { status: "closed" };
+  const inspection = await inspectBinding(client, binding, request.signal);
+  const info = inspection ? await getPaneProcessInfo(client, binding.paneId, request.signal) : undefined;
+  if (!inspection || !processContainsPlanBoard(info ?? {}, binding.socket)) return { status: "closed", binding };
+  try {
+    const current = await sendPlanBoardCommand(binding.socket, { op: "ping" });
+    return { status: "ready", binding, revision: current.revision };
+  } catch { return { status: "closed", binding }; }
+}
+
+async function closePlanBoard(client: HerdrClient, request: { cwd: string; signal?: AbortSignal }): Promise<{ closed: boolean; binding?: HerdrBinding }> {
+  const context = await getHerdrContext(client);
+  const key = bindingKey(context, request.cwd, PLAN_BOARD_ROLE);
+  const binding = (await readHerdrBindings()).get(key);
+  if (!binding || binding.role !== PLAN_BOARD_ROLE) return { closed: false };
+  const inspection = await inspectBinding(client, binding, request.signal);
+  const info = inspection ? await getPaneProcessInfo(client, binding.paneId, request.signal) : undefined;
+  if (inspection && binding.socket && processContainsPlanBoard(info ?? {}, binding.socket)) {
+    await sendPlanBoardCommand(binding.socket, { op: "close" }).catch(() => undefined);
+    await closeBinding(client, binding, request.signal);
+    if (binding.socket) await cleanupGeneratedPlanBoardSocket(binding.socket);
+    return { closed: true, binding };
+  }
+  if (inspection?.shellReady) { await closeBinding(client, binding, request.signal); if (binding.socket) await cleanupGeneratedPlanBoardSocket(binding.socket); return { closed: true, binding }; }
+  if (!inspection && !(await paneExists(client, binding.paneId, request.signal)) && binding.socket) await cleanupGeneratedPlanBoardSocket(binding.socket);
+  await removeHerdrBinding(key, binding.paneId);
+  return { closed: false, binding };
+}
+
 function formatStatus(binding: HerdrBinding, pane: unknown, output: string): string {
   const record = paneRecord(pane) ?? {};
   const lines = [`Herdr side-by-side pane: ${binding.paneId}`, `Role: ${binding.role}`, `Workspace: ${binding.workspaceId}`, `Cwd: ${binding.cwd}`, `Herdr status: ${getString(record, "agent_status") ?? "unknown"}`, `Foreground cwd: ${getString(record, "foreground_cwd") ?? binding.cwd}`, `Last command: ${describeCommand(binding.lastCommand)}`];
@@ -478,14 +805,26 @@ async function executeAction(client: HerdrClient, input: HerdrShellInput, ctx: E
 }
 
 /** Apply a point-in-time pane list without clobbering records written later. */
-export function reconcileLivePaneSnapshot(bindings: Map<string, HerdrBinding>, live: Map<string, Record<string, unknown>>, snapshotTakenAt: number): void {
+export function reconcileLivePaneSnapshot(bindings: Map<string, HerdrBinding>, live: Map<string, Record<string, unknown>>, snapshotTakenAt: number): HerdrBinding[] {
+  const orphaned: HerdrBinding[] = [];
   for (const [key, binding] of bindings) {
     // The snapshot cannot say anything about a binding persisted after it was
     // collected. Leave it to the next pass rather than deleting a new pane.
     const updatedAt = Date.parse(binding.updatedAt);
     if (!Number.isFinite(updatedAt) || updatedAt >= snapshotTakenAt) continue;
     const pane = live.get(binding.paneId);
-    if (!pane || !bindingScopeMatches(pane, binding) || (binding.ownerPaneId !== undefined && !live.has(binding.ownerPaneId))) {
+    const ownerMissing = binding.ownerPaneId !== undefined && !live.has(binding.ownerPaneId);
+    if (!pane || !bindingScopeMatches(pane, binding)) {
+      bindings.delete(key);
+      continue;
+    }
+    if (ownerMissing && (binding.role === VISUALIZATION_VIEWER_ROLE || binding.role === PLAN_BOARD_ROLE)) {
+      // Keep the record until an async process-identity check can reclaim only
+      // a dedicated viewer pane. Missing owner events must not orphan it.
+      orphaned.push(binding);
+      continue;
+    }
+    if (ownerMissing) {
       bindings.delete(key);
       continue;
     }
@@ -497,20 +836,76 @@ export function reconcileLivePaneSnapshot(bindings: Map<string, HerdrBinding>, l
       bindings.set(key, { ...binding, terminalId, updatedAt: new Date().toISOString() });
     }
   }
+  return orphaned;
 }
 
-async function reconcileEvent(event: HerdrEventEnvelope): Promise<void> {
+async function reclaimOrphanedPlanBoard(client: HerdrClient, binding: HerdrBinding): Promise<void> {
+  const inspection = await inspectBinding(client, binding);
+  if (!inspection) {
+    const paneStillExists = await paneExists(client, binding.paneId);
+    await removeHerdrBinding(binding.key, binding.paneId);
+    if (!paneStillExists && binding.socket) await cleanupGeneratedPlanBoardSocket(binding.socket);
+    return;
+  }
+  const info = await getPaneProcessInfo(client, binding.paneId);
+  if (binding.socket && processContainsPlanBoard(info ?? {}, binding.socket)) {
+    await sendPlanBoardCommand(binding.socket, { op: "close" }).catch(() => undefined);
+    await closeBinding(client, binding);
+    await cleanupGeneratedPlanBoardSocket(binding.socket);
+    return;
+  }
+  if (inspection.shellReady) {
+    await closeBinding(client, binding);
+    if (binding.socket) await cleanupGeneratedPlanBoardSocket(binding.socket);
+  } else await removeHerdrBinding(binding.key, binding.paneId);
+}
+
+async function reclaimOrphanedVisualization(client: HerdrClient, binding: HerdrBinding): Promise<void> {
+  const inspection = await inspectBinding(client, binding);
+  if (!inspection) {
+    // The pane may have been repurposed or moved. Either way the owner-scoped
+    // record is stale; never close an unverified pane.
+    await removeHerdrBinding(binding.key, binding.paneId);
+    return;
+  }
+  const info = await getPaneProcessInfo(client, binding.paneId);
+  if (binding.socket && processContainsTerminalViewer(info ?? {}, binding.socket)) {
+    await sendTerminalViewerCommand(binding.socket, { op: "close" }).catch(() => undefined);
+    await closeBinding(client, binding);
+    return;
+  }
+  if (inspection.shellReady && (!binding.socket || !await viewerSocketIsLive(binding.socket))) {
+    // q leaves a verified dedicated pane at its shell prompt.
+    await closeBinding(client, binding);
+    return;
+  }
+  // A repurposed foreground process is untouched, but its unreachable binding
+  // must not keep the orphan alive forever.
+  await removeHerdrBinding(binding.key, binding.paneId);
+}
+
+async function reconcileEvent(client: HerdrClient, event: HerdrEventEnvelope): Promise<void> {
   const data = event.data;
+  const orphaned: HerdrBinding[] = [];
   const paneId = getString(data, "pane_id", "previous_pane_id");
   const tabId = getString(data, "tab_id");
   const workspaceId = getString(data, "workspace_id");
   const previousPaneId = getString(data, "previous_pane_id");
   await updateHerdrBindings((bindings) => {
     for (const [key, binding] of bindings) {
-      if ((event.event === "pane.closed" || event.event === "pane.exited") && paneId !== undefined && (binding.paneId === paneId || binding.ownerPaneId === paneId)) bindings.delete(key);
+      if ((event.event === "pane.closed" || event.event === "pane.exited") && paneId !== undefined) {
+        if (binding.paneId === paneId) bindings.delete(key);
+        else if (binding.ownerPaneId === paneId) {
+          if (binding.role === VISUALIZATION_VIEWER_ROLE || binding.role === PLAN_BOARD_ROLE) orphaned.push(binding);
+          else bindings.delete(key);
+        }
+      }
       if (event.event === "tab.closed" && tabId !== undefined && binding.parentTabId === tabId) bindings.delete(key);
       if (event.event === "workspace.closed" && workspaceId !== undefined && binding.workspaceId === workspaceId) bindings.delete(key);
-      if (event.event === "pane.moved" && previousPaneId !== undefined && binding.ownerPaneId === previousPaneId) bindings.delete(key);
+      if (event.event === "pane.moved" && previousPaneId !== undefined && binding.ownerPaneId === previousPaneId) {
+        if (binding.role === VISUALIZATION_VIEWER_ROLE || binding.role === PLAN_BOARD_ROLE) orphaned.push(binding);
+        else bindings.delete(key);
+      }
       if (event.event === "pane.moved" && previousPaneId !== undefined && binding.paneId === previousPaneId) {
         const moved = getRecord(data, "pane");
         if (binding.role === NOTES_ROLE && moved) bindings.set(key, { ...binding, paneId: getString(moved, "pane_id") ?? binding.paneId, terminalId: getString(moved, "terminal_id") ?? binding.terminalId, workspaceId: getString(moved, "workspace_id") ?? binding.workspaceId, parentTabId: getString(moved, "tab_id") ?? binding.parentTabId, updatedAt: new Date().toISOString() });
@@ -518,6 +913,13 @@ async function reconcileEvent(event: HerdrEventEnvelope): Promise<void> {
       }
     }
   });
+  for (const binding of orphaned) {
+    try {
+      if (binding.role === PLAN_BOARD_ROLE) await reclaimOrphanedPlanBoard(client, binding);
+      else await reclaimOrphanedVisualization(client, binding);
+    }
+    catch { /* Keep the stale record so the next reconciliation can retry safely. */ }
+  }
 }
 
 export default function herdrShellExtension(pi: ExtensionAPI): void {
@@ -536,7 +938,7 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
     reconcileTimer = undefined;
     currentContext = ctx;
     if (process.env.HERDR_ENV === "1") {
-      subscriber = new HerdrEventSubscriber({ onEvent: (event) => { void enqueue(() => reconcileEvent(event)); } });
+      subscriber = new HerdrEventSubscriber({ onEvent: (event) => { void enqueue(() => reconcileEvent(client, event)); } });
       subscriber.start();
       // The subscription is best effort. Periodically prune records proven absent
       // by the supported list API when a socket is unavailable or reconnecting.
@@ -548,7 +950,11 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
             const paneId = extractPaneId(pane);
             return paneId ? [[paneId, pane] as const] : [];
           }));
-          await updateHerdrBindings((bindings) => reconcileLivePaneSnapshot(bindings, live, snapshotTakenAt));
+          const orphaned = await updateHerdrBindings((bindings) => reconcileLivePaneSnapshot(bindings, live, snapshotTakenAt));
+          for (const binding of orphaned) {
+            if (binding.role === PLAN_BOARD_ROLE) await reclaimOrphanedPlanBoard(client, binding);
+            else await reclaimOrphanedVisualization(client, binding);
+          }
         }).catch(() => undefined);
       }, 60_000);
       reconcileTimer.unref();
@@ -568,6 +974,122 @@ export default function herdrShellExtension(pi: ExtensionAPI): void {
       (result) => request.respond!({ ok: true, ...result }),
       (error: unknown) => request.respond!({ ok: false, error: formatHerdrError(error) }),
     );
+  });
+  pi.events.on("herdr:open-terminal-viewer", (value) => {
+    const request = value as Partial<HerdrTerminalViewerRequest>;
+    if (request.role !== VISUALIZATION_VIEWER_ROLE || typeof request.cwd !== "string" || typeof request.socket !== "string" || !isRecord(request.scene) || typeof request.respond !== "function") {
+      if (typeof request.respond === "function") request.respond({ ok: false, error: "herdr:open-terminal-viewer accepts only typed visualization viewer requests." });
+      return;
+    }
+    if (request.signal?.aborted) { request.respond({ ok: false, error: "Terminal viewer request was cancelled." }); return; }
+    if (!currentContext) { request.respond({ ok: false, error: "No active Pi session is available for Herdr." }); return; }
+    void enqueue(() => openTerminalViewer(client, request as HerdrTerminalViewerRequest)).then(
+      (result) => request.respond!({ ok: true, ...result }),
+      (error: unknown) => request.respond!({ ok: false, error: formatHerdrError(error) }),
+    );
+  });
+  pi.events.on("herdr:status-terminal-viewer", (value) => {
+    const request = value as Partial<HerdrTerminalViewerStatusRequest>;
+    if (request.role !== VISUALIZATION_VIEWER_ROLE || typeof request.cwd !== "string" || typeof request.respond !== "function") {
+      if (typeof request.respond === "function") request.respond({ ok: false, error: "herdr:status-terminal-viewer accepts only typed visualization viewer requests." });
+      return;
+    }
+    void enqueue(() => statusTerminalViewer(client, request as HerdrTerminalViewerStatusRequest)).then(
+      (result) => request.respond!({ ok: true, ...result }),
+      (error: unknown) => request.respond!({ ok: false, error: formatHerdrError(error) }),
+    );
+  });
+  pi.events.on("herdr:close-terminal-viewer", (value) => {
+    const request = value as Partial<{ role: typeof VISUALIZATION_VIEWER_ROLE; cwd: string; socket: string; signal?: AbortSignal; respond: (result: { ok: boolean; error?: string; closed?: boolean }) => void }>;
+    if (request.role !== VISUALIZATION_VIEWER_ROLE || typeof request.cwd !== "string" || typeof request.socket !== "string" || typeof request.respond !== "function") {
+      if (typeof request.respond === "function") request.respond({ ok: false, error: "herdr:close-terminal-viewer accepts only typed visualization viewer requests." });
+      return;
+    }
+    void enqueue(() => closeTerminalViewer(client, request)).then(
+      (result) => request.respond!({ ok: true, closed: result.closed }),
+      (error: unknown) => request.respond!({ ok: false, error: formatHerdrError(error) }),
+    );
+  });
+  pi.events.on("herdr:open-plan-board", (value) => {
+    const request = value as Partial<HerdrPlanBoardRequest>;
+    if (request.role !== PLAN_BOARD_ROLE || typeof request.cwd !== "string" || request.socket !== "" || !isRecord(request.snapshot) || typeof request.respond !== "function") {
+      if (typeof request.respond === "function") request.respond({ ok: false, error: "herdr:open-plan-board accepts only typed Plan Board requests." });
+      return;
+    }
+    try { request.snapshot = validatePlanBoardSnapshot(request.snapshot); }
+    catch (error) { request.respond({ ok: false, error: formatHerdrError(error) }); return; }
+    if (request.signal?.aborted) { request.respond({ ok: false, error: "Plan Board request was cancelled." }); return; }
+    if (!currentContext) { request.respond({ ok: false, error: "No active Pi session is available for Herdr." }); return; }
+    void enqueue(() => openPlanBoard(client, request as HerdrPlanBoardRequest)).then(
+      (result) => request.respond!({ ok: true, ...result }),
+      (error: unknown) => request.respond!({ ok: false, error: formatHerdrError(error) }),
+    );
+  });
+  pi.events.on("herdr:update-plan-board", (value) => {
+    const request = value as Partial<HerdrPlanBoardRequest>;
+    if (request.role !== PLAN_BOARD_ROLE || typeof request.cwd !== "string" || !isRecord(request.snapshot) || typeof request.respond !== "function") {
+      if (typeof request.respond === "function") request.respond({ ok: false, error: "herdr:update-plan-board accepts only typed Plan Board requests." });
+      return;
+    }
+    try { request.snapshot = validatePlanBoardSnapshot(request.snapshot); }
+    catch (error) { request.respond({ ok: false, error: formatHerdrError(error) }); return; }
+    void enqueue(() => updatePlanBoard(client, request as HerdrPlanBoardRequest)).then(
+      (result) => request.respond!({ ok: true, binding: result.binding, revision: result.revision }),
+      (error: unknown) => request.respond!({ ok: false, error: formatHerdrError(error) }),
+    );
+  });
+  pi.events.on("herdr:status-plan-board", (value) => {
+    const request = value as Partial<HerdrPlanBoardStatusRequest>;
+    if (request.role !== PLAN_BOARD_ROLE || typeof request.cwd !== "string" || typeof request.respond !== "function") {
+      if (typeof request.respond === "function") request.respond({ ok: false, error: "herdr:status-plan-board accepts only typed Plan Board requests." });
+      return;
+    }
+    void enqueue(() => statusPlanBoard(client, request as HerdrPlanBoardStatusRequest)).then(
+      (result) => request.respond!({ ok: true, ...result }),
+      (error: unknown) => request.respond!({ ok: false, error: formatHerdrError(error) }),
+    );
+  });
+  pi.events.on("herdr:close-plan-board", (value) => {
+    const request = value as Partial<{ role: typeof PLAN_BOARD_ROLE; cwd: string; signal?: AbortSignal; respond: (result: { ok: boolean; error?: string; closed?: boolean }) => void }>;
+    if (request.role !== PLAN_BOARD_ROLE || typeof request.cwd !== "string" || typeof request.respond !== "function") {
+      if (typeof request.respond === "function") request.respond({ ok: false, error: "herdr:close-plan-board accepts only typed Plan Board requests." });
+      return;
+    }
+    void enqueue(() => closePlanBoard(client, request)).then(
+      (result) => request.respond!({ ok: true, closed: result.closed, binding: result.binding }),
+      (error: unknown) => request.respond!({ ok: false, error: formatHerdrError(error) }),
+    );
+  });
+  pi.events.on("plan-board:plan", (value) => {
+    if (process.env.HERDR_ENV !== "1") return;
+    const request = value as Partial<{ cwd: string; snapshot: unknown }>;
+    if (typeof request.cwd !== "string" || !isRecord(request.snapshot)) return;
+    let snapshot: PlanBoardSnapshot;
+    try { snapshot = validatePlanBoardSnapshot(request.snapshot); } catch { return; }
+    void enqueue(async () => {
+      const context = await getHerdrContext(client);
+      const binding = (await readHerdrBindings()).get(bindingKey(context, request.cwd!, PLAN_BOARD_ROLE));
+      if (!binding?.socket) return;
+      try {
+        await updatePlanBoard(client, { role: PLAN_BOARD_ROLE, cwd: request.cwd!, socket: binding.socket, snapshot, respond: () => undefined });
+      } catch {
+        await openPlanBoard(client, { role: PLAN_BOARD_ROLE, cwd: request.cwd!, socket: "", snapshot, respond: () => undefined });
+      }
+    }).catch(() => undefined);
+  });
+  pi.events.on("plan-board:scene", (value) => {
+    if (process.env.HERDR_ENV !== "1") return;
+    const request = value as Partial<{ cwd: string; scene: unknown }>;
+    if (typeof request.cwd !== "string" || !isRecord(request.scene)) return;
+    void enqueue(async () => {
+      const context = await getHerdrContext(client);
+      const binding = (await readHerdrBindings()).get(bindingKey(context, request.cwd!, PLAN_BOARD_ROLE));
+      if (!binding?.socket) return;
+      const current = await sendPlanBoardCommand(binding.socket, { op: "get" });
+      if (!current.snapshot) return;
+      const snapshot = validatePlanBoardSnapshot({ ...current.snapshot, scene: request.scene });
+      await updatePlanBoard(client, { role: PLAN_BOARD_ROLE, cwd: request.cwd!, socket: binding.socket, snapshot, respond: () => undefined });
+    }).catch(() => undefined);
   });
   pi.registerTool({
     name: "herdr_shell", label: "Herdr Shell", description: "Control one persistent shell in the current tab's right-side Herdr pane. It never reuses a notes/Neovim pane or a pane whose foreground process is not its shell. Use bash when Pi needs output this turn.", promptSnippet: "Run long-lived work in a Herdr side pane", promptGuidelines: ["Use open or run for long-lived work, then read_output to verify it started.", "It runs asynchronously and reuses only a verified shell pane in the current Herdr tab."], parameters: HerdrShellParameters, executionMode: "sequential",

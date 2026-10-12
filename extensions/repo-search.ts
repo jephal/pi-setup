@@ -70,7 +70,7 @@ function invalidNumber(name: string, value: unknown, description: string): Error
 	return new Error(`Invalid ${name}: expected ${description}, received ${String(value)}`);
 }
 
-/** Apply the same safe numeric limits to direct and CallScript searches. */
+/** Apply the same safe numeric limits to direct repository searches. */
 export function validateRepoSearchInput(input: RepoSearchInput): void {
 	if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > MAX_SEARCH_RESULTS)) {
 		throw invalidNumber("search limit", input.limit, `an integer from 1 to ${MAX_SEARCH_RESULTS}`);
@@ -190,7 +190,7 @@ export async function requireExistingExecutable(binary: string, signal?: AbortSi
 	throwIfAborted(signal);
 }
 
-/** Build the native Pi definition used by both the direct tool and pi_program. */
+/** Build the native Pi definition used by the direct repository search tool. */
 export function createRepoSearchToolDefinition(): ToolDefinition {
 	return {
 		name: "repo_search",
