@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checklistMarkdown, PLAN_MODE_RESEARCH_GATE, PLAN_MODE_TOOL_ACCESS, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, summarizePlanChanges } from "./plan-text.ts";
+import { checklistMarkdown, PLAN_BOARD_GUIDANCE, PLAN_MODE_RESEARCH_GATE, PLAN_MODE_TOOL_ACCESS, PLAN_MODE_VISUALIZATION_GUIDANCE, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, summarizePlanChanges } from "./plan-text.ts";
 
 test("plan tool guidance distinguishes full Plan mode plans from outside-mode checklists", () => {
 	assert.match(PLAN_TOOL_DESCRIPTION, /In Plan mode/);
@@ -12,7 +12,13 @@ test("plan tool guidance distinguishes full Plan mode plans from outside-mode ch
 	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /final decision and execution contract/);
 	assert.match(PLAN_TOOL_PROMPT_SNIPPET, /checklists outside Plan mode/);
 	assert.match(PLAN_MODE_WRITING_STYLE, /scope, audience, and conclusion/);
-	assert.match(PLAN_MODE_TOOL_ACCESS, /notes, memory, Fovea, Herdr inspection/);
+	assert.match(PLAN_MODE_TOOL_ACCESS, /read-only context tools/);
+	assert.match(PLAN_MODE_TOOL_ACCESS, /does not write notes or memory/);
+	assert.match(PLAN_MODE_TOOL_ACCESS, /visualization previews/);
+	assert.match(PLAN_BOARD_GUIDANCE, /authoritative Pi plan/);
+	assert.match(PLAN_BOARD_GUIDANCE, /never use herdr_shell/);
+	assert.match(PLAN_MODE_VISUALIZATION_GUIDANCE, /action preview only/);
+	assert.match(PLAN_MODE_VISUALIZATION_GUIDANCE, /explicit project-relative/);
 	assert.ok(PLAN_TOOL_PROMPT_GUIDELINES.some((guideline) => /steps and no full Markdown content/.test(guideline)));
 	assert.ok(PLAN_TOOL_PROMPT_GUIDELINES.some((guideline) => /Enter Plan mode first/.test(guideline)));
 	assert.ok(PLAN_TOOL_PROMPT_GUIDELINES.some((guideline) => /research and discovery are complete/.test(guideline)));

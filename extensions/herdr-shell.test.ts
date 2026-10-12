@@ -2,10 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HerdrClient } from "./herdr-client.ts";
+import { fileURLToPath } from "node:url";
 import { HerdrError } from "./herdr-client.ts";
-import herdrShellExtension, { createPane, discoveredNotesBinding, extractCurrentContext, getHerdrContext, getPaneProcessInfo, hasLostGenericShellOwnership, herdrShellBindingKey, isShellForeground, reconcileLivePaneSnapshot, runPaneCommandWithRecovery } from "./herdr-shell.ts";
+import herdrShellExtension, { createPane, discoveredNotesBinding, extractCurrentContext, getHerdrContext, getPaneProcessInfo, hasLostGenericShellOwnership, herdrShellBindingKey, isShellForeground, preservePlanBoardScene, processContainsTerminalViewer, processContainsPlanBoard, reconcileLivePaneSnapshot, runPaneCommandWithRecovery } from "./herdr-shell.ts";
 
-function binding(paneId: string, role: "generic-shell" | "notes-viewer" = "generic-shell") {
+function binding(paneId: string, role: "generic-shell" | "notes-viewer" | "visualization-viewer" = "generic-shell") {
   return {
     key: "w1|w1:t1|/repo",
     role,
@@ -148,6 +149,35 @@ test("records the actual Herdr cwd when discovering a Notes viewer", () => {
   assert.equal(viewer.cwd, "/other-project");
 });
 
+test("recognizes only the exact known terminal viewer executable and entry path", () => {
+  const entry = fileURLToPath(new URL("./excalidraw-terminal-viewer.ts", import.meta.url));
+  const argv = [process.execPath, "--experimental-strip-types", entry, "--socket", "/tmp/viewer.sock"];
+  assert.equal(processContainsTerminalViewer({ foreground_processes: [{ argv }] }, "/tmp/viewer.sock"), true);
+  assert.equal(processContainsTerminalViewer({ foreground_processes: [{ argv: [process.execPath, "--experimental-strip-types", "other.ts", "--socket", "/tmp/viewer.sock"] }] }, "/tmp/viewer.sock"), false);
+  assert.equal(processContainsTerminalViewer({ foreground_processes: [{ argv: ["node", "--experimental-strip-types", entry, "--socket", "/tmp/viewer.sock"] }] }, "/tmp/viewer.sock"), false);
+});
+
+test("recognizes only the fixed Plan Board process command", () => {
+  const entry = fileURLToPath(new URL("./plan-board-process.ts", import.meta.url));
+  const argv = [process.execPath, "--experimental-strip-types", entry, "--socket", "/tmp/board.sock"];
+  assert.equal(processContainsPlanBoard({ foreground_processes: [{ argv }] }, "/tmp/board.sock"), true);
+  assert.equal(processContainsPlanBoard({ foreground_processes: [{ argv: [process.execPath, "--experimental-strip-types", "other.ts", "--socket", "/tmp/board.sock"] }] }, "/tmp/board.sock"), false);
+});
+
+test("clears a Plan Board scene on clear or scope change but preserves same-scope updates", () => {
+  const scene = { type: "excalidraw", elements: [] };
+  const current = {
+    version: 1 as const, title: "Board", status: "active" as const, scene,
+    identity: { name: "Board", repository: "repo", branch: "main", root: "/repo", sessionId: "session" }, lines: [],
+  };
+  const sameScope = preservePlanBoardScene(current, { ...current, scene: undefined });
+  assert.deepEqual(sameScope.scene, scene);
+  const cleared = preservePlanBoardScene(current, { ...current, status: "cleared", scene: undefined });
+  assert.equal(cleared.scene, undefined);
+  const otherBranch = preservePlanBoardScene(current, { ...current, identity: { ...current.identity, branch: "feature/other" }, scene: undefined });
+  assert.equal(otherBranch.scene, undefined);
+});
+
 test("treats a changed generic terminal as lost ownership but permits Notes Nvim recovery", () => {
   const shell = { ...binding("w1:p1"), terminalId: "term-old" };
   const restarted = { pane: {}, terminalId: "term-new", shellReady: true };
@@ -164,6 +194,14 @@ test("snapshot reconciliation preserves a binding written after the pane list an
   const records = new Map([["old", oldUnscoped]]);
   reconcileLivePaneSnapshot(records, new Map([[oldUnscoped.paneId, { workspace_id: "w1", cwd: "/repo" }]]), 10_000);
   assert.ok(records.has("old"));
+});
+
+test("reconciliation marks an owner-missing visualization for asynchronous reclamation", () => {
+  const viewer = { ...binding("viewer", "visualization-viewer"), ownerPaneId: "owner", socket: "/tmp/viewer.sock", updatedAt: new Date(1).toISOString() };
+  const records = new Map([[viewer.key, viewer]]);
+  const orphaned = reconcileLivePaneSnapshot(records, new Map([[viewer.paneId, { workspace_id: "w1", tab_id: "w1:t1", cwd: "/repo" }]]), 10_000);
+  assert.deepEqual(orphaned.map((item) => item.paneId), ["viewer"]);
+  assert.ok(records.has(viewer.key));
 });
 
 test("reconciliation retains generic terminal ownership fences but refreshes Notes terminal identity", () => {

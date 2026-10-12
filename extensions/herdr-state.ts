@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const HERDR_STATE_VERSION = 3;
-export type HerdrBindingRole = "generic-shell" | "notes-viewer";
+export type HerdrBindingRole = "generic-shell" | "notes-viewer" | "visualization-viewer" | "plan-board";
 
 export interface HerdrBinding {
   key: string;
@@ -15,6 +15,8 @@ export interface HerdrBinding {
   ownerPaneId?: string;
   paneId: string;
   terminalId?: string;
+  /** Private control socket for a managed visualization viewer. */
+  socket?: string;
   cwd: string;
   lastCommand?: string;
   createdAt: string;
@@ -43,7 +45,8 @@ function isBinding(value: unknown): value is HerdrBinding {
   if (!isRecord(value)) return false;
   return ["key", "workspaceId", "paneId", "cwd", "createdAt", "updatedAt"].every((key) => typeof value[key] === "string") &&
     (value.ownerPaneId === undefined || typeof value.ownerPaneId === "string") &&
-    (value.role === "generic-shell" || value.role === "notes-viewer");
+    (value.socket === undefined || typeof value.socket === "string") &&
+    (value.role === "generic-shell" || value.role === "notes-viewer" || value.role === "visualization-viewer" || value.role === "plan-board");
 }
 
 type DecodedState =

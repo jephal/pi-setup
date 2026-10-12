@@ -18,6 +18,11 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Inline option editing
   - Free-form answers
   - Optional ASCII visualizations
+- Visualization
+  - Terminal-first Mermaid and deterministic Excalidraw previews
+  - Pure ANSI/Unicode Excalidraw renderer and interactive terminal viewer
+  - Official Excalidraw React viewer bundled as local static assets (preserved)
+  - Tokenized loopback-only scene server with bounded, revision-checked writes
 - Shared Pi UI primitives
   - Shared editable-option state and safe TUI rendering helpers
 - Approval modes
@@ -29,16 +34,14 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
 - Repository search
   - Gives Pi a native `repo_search` router for file-name and text searches
   - Auto routes glob-like queries to `find` and other queries to `grep`; explicit modes override
-  - Shares the same router with the `repo.search` CallScript capability
-- CallScript Pi programs
-  - Gives Pi one `pi_program` tool backed by CallScript's neutral core API
-  - Mounts repository reads, bounded `repo.edit`/`repo.write`, public Fovea sketch/focus/dwell/impact, Notes list/search/read, Memory search/list, and parent-owned dynamic Datadog search/describe/call
-  - Uses per-operation confirmation in Manual/Approve, explicit `suspend:true` confirmation in Auto, and blocks writes in Review/Plan and all headless modes
-  - Uses a shared access policy and bounded text normalization; repository operations remain inside the execution cwd
-  - Keeps bash, shell/Herdr, scheduled tasks, MCP mutation, Notes/Memory mutation, and subagents direct-only
-  - The nested calls bypass Pi's `tool_call` event, so the intrinsic capability and approval boundary is authoritative
+  - Uses Pi's native `find` and `grep` implementations for bounded repository search
+- Native Pi 1.1 CodeMode and MCP
+  - Uses the host's native CodeMode for bounded multi-tool orchestration instead of a custom CallScript layer
+  - Uses Pi's native MCP support for configured servers, tool discovery, and permission handling
+  - Keeps repository writes, shell/Herdr commands, Notes/Memory mutation, scheduled tasks, and subagents as direct tools with their existing approval policies
 - Herdr shell integration
   - Gives Pi a `herdr_shell` tool for long-running commands and local servers
+  - Gives visualization a dedicated `visualization-viewer` pane role; it never uses a generic shell or Notes pane
   - Creates one right-side pane in the current Herdr tab, never a new tab or workspace
   - Runs commands in the pane without blocking Pi
   - Reads bounded recent output back through Herdr's supported `pane read` API
@@ -48,15 +51,18 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Keeps only a small `datadog_search_tools` loader active in pi's context
   - Loads matching `core`, `error-tracking`, and `rum` tools on demand
   - Keeps Datadog credentials in the CLI's local OAuth store, not in this repository
-- Plan mode
-  - Branch/session-scoped plan storage
+- Plan mode and Plan Board
+  - Branch/session-scoped authoritative plan storage
+  - Dedicated derived `plan-board` Herdr pane with explicit `plan_board` display actions
+  - Bounded Markdown/checkpoint projection rendered with Pi's shared Markdown component, with safe plain-line fallback, Mermaid Unicode preprocessing, and optional Excalidraw ANSI scenes
+  - Private 0600 socket snapshots with scrolling, redraw, revision checks, and safe recovery
   - Concise plan review UI
   - Shared HITL decisions and feedback
   - Markdown task checkpoints and above-editor execution progress
   - Visible Plan → execution transitions
   - Full Markdown plans in Plan mode; compact checklist-only tracking outside Plan mode
-  - Plan mode keeps non-code-changing tools available, including notes, memory, Fovea, Herdr inspection, Datadog investigation, and scheduled tasks
-  - Project code mutation tools and unsafe shell commands remain blocked in Plan mode
+  - Plan mode keeps read-only context tools available, including note listing/search/read, Fovea, Datadog investigation, scheduled-task listing, safe shell inspection, and visualization previews
+  - Plan mode does not write notes or memory, change schedules, run Herdr commands, edit project code, or write visualization artifacts
   - Research first: Plan mode is for the final decision and execution contract, not initial research; scope and conclusion first, key decisions, rationale, trade-offs, risks, and next decision
 - Memory
   - Local SQLite-backed user and project memories
@@ -149,30 +155,13 @@ only `mcp_read` and resource-read permissions (not `mcp_write`), and keep
 toolsets. The extension does not infer permissions from tool names or apply a `write`
 name heuristic; unexpected endpoint toolsets are rejected.
 
-## Repository search and CallScript programs
+## Repository search and native Pi orchestration
 
-The package registers `repo_search`, a native repository search router, and `pi_program`, a bounded CallScript runner for repository inspection and narrowly scoped repository edits. `repo_search` uses Pi's native `find` and `grep` implementations: glob-like queries route to file names, and other queries route to file contents. Set `mode` to `files` or `text` to override auto routing. The compact shared schema accepts `query`, `mode`, `path`, `glob`, `ignoreCase`, `literal`, `context`, and `limit` as relevant to the selected search.
+The package registers `repo_search`, a native repository search router. Glob-like queries route to file names and other queries route to file contents. Set `mode` to `files` or `text` to override auto routing. The compact schema accepts `query`, `mode`, `path`, `glob`, `ignoreCase`, `literal`, `context`, and `limit` as relevant to the selected search.
 
-CallScript compiles the submitted JavaScript into a validated plan; it does not execute model-authored JavaScript. The neutral registry is an explicit host-capability catalog with shared access classification and bounded result normalization. It contains:
+Pi 1.1 provides native CodeMode and MCP support. CodeMode is the preferred way to compose multiple registered tools without maintaining a second CallScript runtime. MCP servers are configured and governed by Pi's native MCP integration. The package keeps its direct tools independently registered so their existing approval, ownership, and lifecycle behavior remains authoritative.
 
-- `repo.read`, `repo.find`, `repo.grep`, `repo.ls`, and `repo.search`
-- `repo.edit` and `repo.write`, the only CallScript side effects
-- `fovea.sketch`, `fovea.focus`, `fovea.dwell`, and `fovea.impact` through the public `pi-fovea/ops` export
-- `notes.list`, `notes.search`, and `notes.read`
-- `memory.search` and `memory.list` (without recording retrieval usage)
-- Parent-owned dynamic `datadog.search`, `datadog.describe`, and `datadog.call`
-
-Each invocation builds the registry for the execution cwd. Nested arguments are validated against the capability schemas before dispatch. Results are normalized to bounded text, and image/UI-only blocks are omitted. The adapter checks the outer abort signal before every nested call and during active operations. Dynamic Datadog calls stay in the parent OAuth/MCP lifecycle; each call refreshes and revalidates the remote lifecycle, exact name, and current input schema, and no credential is passed into CallScript.
-
-Paths are resolved within the execution cwd. Absolute paths are allowed only when they remain inside that directory; paths using `~`, `..`, or `file://`, and symlinks, are rejected when resolution would escape it. This keeps the pilot repository-scoped rather than inheriting Pi's unrestricted path behavior.
-
-The pilot uses conservative CallScript bounds: 20 steps, 25 calls per fan-out, 50 worst-case calls per script, five concurrent calls, 64 KiB per nested result, and a 96 KiB final result. Nested inputs also cap `read.limit` at 2,000 lines, search limits at 2,000 results, and grep context at 20 lines. `repo.write` content is limited to 32 KiB; `repo.edit` accepts at most 10 replacements, with 8 KiB per old/new text and 32 KiB total. Side-effect fan-out with `each`, detached programs/steps, and edit/write steps without a non-empty reason are rejected. `find` and `grep` require an existing `fd` and `rg` executable. The adapter never invokes Pi's downloader, so missing binaries produce a compact error and do not write a tool cache or access the network.
-
-CallScript dispatches nested calls directly, so they do not emit Pi's outer `tool_call` event. The mount boundary is authoritative, and the bridge calls only the explicit host adapters for the capabilities listed above.
-
-`repo.edit` and `repo.write` use CallScript's suspension and resolution protocol inside the same outer `pi_program` execution. Manual and Approve modes ask for confirmation for each operation. The approval preview shows the repository path, the required reason, and a bounded old/new edit or proposed-content preview. CallScript state is retained while approvals are collected, then the script resumes only after the outstanding decisions resolve. A denial resumes as a failed operation and does not dispatch that write. Auto mode runs side effects without a prompt unless the script explicitly sets `suspend: true`; that explicit suspension still requires confirmation. Review and Plan modes block side effects. All headless sessions block repository writes, including Auto, because they cannot show an interactive approval.
-
-The other mutation and command capabilities remain direct-only: `bash`, shell and Herdr commands, Notes/Memory mutation, Datadog mutation, scheduled tasks, interactive tools, and subagents. Pi's built-in `write` and `edit` tools are not mounted as generic CallScript tools; only the bounded `repo.write` and `repo.edit` adapters are available.
+Repository edits, shell and Herdr commands, Notes/Memory mutation, Datadog mutation, scheduled tasks, interactive visualization controls, and subagents remain direct-only. The package does not expose an unrestricted JavaScript runner or a generic nested write adapter.
 
 ## Local notes integration
 
@@ -222,6 +211,34 @@ tags: []
 
 New or updated notes receive missing defaults automatically; existing metadata is preserved and `updated` is refreshed. The implementation supports a conservative YAML subset and does not add a YAML package. The integration is agent-first and does not automatically inject the whole directory into context. Ask the agent to search or list notes when needed, then read only the relevant notes. For writes, the agent must choose `create`, `overwrite`, or `append` explicitly.
 
+## Local Excalidraw viewer
+
+Persistent diagrams belong in Herdr, not in the Pi transcript. Use `action: "terminal_viewer"` with a bounded structured graph and `target: "open"`, `"update"`, `"status"`, or `"close"` after entering normal execution. The terminal viewer runs in a dedicated Herdr `visualization-viewer` pane when Pi runs inside Herdr, reuses that one pane across updates/reloads, and returns only a compact pane ID, revision, and status acknowledgement to Pi chat. The compatibility form `action: "viewer", target: "terminal_viewer"` remains accepted. Plan mode permits only `action: "preview"`; Review mode permits previews and the existing browser viewer read-only, but blocks terminal pane control and artifact writes.
+
+The terminal viewer runs in the current terminal outside Herdr. Controls are arrows or `h/j/k/l` to pan, `+/-` to zoom, `0` to reset, and `q` to quit. The process uses a private 0600 Unix-socket JSON protocol and an exact known viewer command (`node --experimental-strip-types <viewer-entry> --socket <socket>`); model-authored shell commands are never interpolated. `set_scene` is initial-only, later replacements use revision-checked updates, and each control connection accepts one frame only. Oversized, pipelined, or idle control connections are destroyed.
+
+Use `action: "preview"` for Mermaid or Excalidraw previews; Mermaid and preview wireframes stay in Pi chat and are the default lightweight visualization. Use `action: "artifact"` only for an explicit project-relative `.excalidraw` file. Persistent Excalidraw visuals should use the Herdr pane so normal Pi output remains compact.
+
+The terminal renderer supports rectangles, diamonds, ellipses, lines/arrows, and text, with bounded `LR`/`TD` graph layout and plain labels. It bounds terminal dimensions, scene elements, labels, output bytes, control buffers, and world coordinates; line drawing is bounded by the canvas. Unsupported Excalidraw elements are omitted from geometry and label calculations with an on-screen notice, and narrow panes report clipped labels. ANSI styling is applied after display-column clipping, including CJK, emoji, and combining text. Non-TTY invocations print one bounded ANSI/Unicode frame and remain controllable through the socket.
+
+The existing browser viewer remains preserved and available, but is non-default: use `action: "viewer"`, `format: "excalidraw"`, and bounded structured `nodes`/`edges` when an external browser URL is explicitly needed. Pi starts a temporary HTTP server on `127.0.0.1` and returns a tokenized URL such as `http://127.0.0.1:<port>/viewer/?token=...`. Open that URL in a modern browser outside Herdr. The server exposes its current writable state to the browser; Plan and Review show a clear read-only canvas and do not queue writes. Browser scene writes preserve unknown fields and merge embedded file records by ID. Browser assets under `viewer/` and `viewer/dist/` remain intact. Review mode may start this browser viewer, but its canvas is read-only and the `visualize` tool rejects terminal-pane and artifact requests.
+
+The browser viewer is the official `@excalidraw/excalidraw` React application compiled into the package under `viewer/dist`. It uses only shipped local JavaScript, CSS, fonts, and other assets. The browser must support the bundled modern JavaScript and Excalidraw canvas APIs. Browser scene updates stay in memory, require the current revision, and are bounded; Pi closes the session server on reload or shutdown. Plan mode permits only `action: "preview"`, which does not start a server or write an artifact. Review mode permits the browser viewer only in read-only mode. Use `action: "artifact"` with an explicit project-relative `.excalidraw` path when a durable file is wanted.
+
+The token is the access control for the local session. The server binds only to loopback, serves only the packaged viewer directory, does not execute scene values, and does not send scene data or scripts to a remote service. The token is used in the initial page URL only; the browser then uses the `HttpOnly` session cookie for API requests. The viewer also sends restrictive CSP and referrer policies. Anyone who can read the URL on the same user account can use that live session, so do not share it. The viewer is intentionally limited: it is not a collaboration server, does not persist browser edits by itself, and does not add Herdr embedding or remote access.
+
+Rebuild the shipped browser bundle after changing viewer code with:
+
+```bash
+npm run build:viewer
+```
+
+The root `THIRD-PARTY-NOTICES` file contains the licenses for Excalidraw and the dependencies bundled into the viewer. Verify the release contents without creating an archive with:
+
+```bash
+npm run check:package
+```
+
 ## Development
 
 Stable Pi features are shipped from this repository as one package. Source remains organized by feature: extension entrypoints live under `extensions/`, and shared implementation lives under namespaced `src/` directories. Fovea remains a separately versioned bundled dependency so its graph engine can be updated independently.
@@ -236,7 +253,7 @@ Run the local test suite with:
 npm test
 ```
 
-The package intentionally has no standalone TypeScript project configuration: Pi supplies the extension peer dependencies and loads TypeScript directly. The test suite runs the extension test files with Node's TypeScript stripping, and focused `node --experimental-strip-types --check` commands are used for edited entrypoints instead of adding a loader-specific typecheck configuration.
+The package intentionally has no standalone TypeScript project configuration: Pi supplies the extension peer dependencies and loads TypeScript directly. The supported runtime is Node 22.6.0 or newer because the viewer launch command uses `--experimental-strip-types`. The test suite runs the extension test files with Node's TypeScript stripping, and focused `node --experimental-strip-types --check` commands are used for edited entrypoints instead of adding a loader-specific typecheck configuration.
 
 ## Subagents
 
@@ -406,6 +423,8 @@ Use Pi's built-in `bash` tool for short-lived commands whose stdout/stderr the m
 
 Herdr is optional. If Pi is not running inside Herdr, `herdr_shell` returns an explanatory error and normal `bash` remains available. Set `HERDR_BIN` if the Herdr executable is not on `PATH`. The minimum supported Herdr version is `0.7.5`.
 
-Herdr panes are intentionally not closed when Pi reloads or exits. Ask the model to use `action: "close"`, or stop the process in Herdr, when the server should end.
+Generic Herdr shell panes are intentionally not closed when Pi reloads or exits. Plan Board panes use the dedicated `plan-board` role and a private socket. The board is a derived display of Pi's authoritative plan, scoped to the current session/workspace/tab/owner, and is opened explicitly with `plan_board({ action: "open" })`; plan saves, checkpoint transitions, execution approval, clears, reloads, branch changes, and explicit board-scene previews update or clear an already active board without opening a second diagram pane. Board snapshots enforce an aggregate size limit across Markdown, fallback lines, and optional scenes; a scene is carried only across non-cleared updates in the same plan scope, so clears and scope changes remove stale diagrams. Use `plan_board` with `update`, `status`, or `close` for fixed lifecycle operations. It never accepts arbitrary commands and never reuses Notes, generic-shell, visualization, or human panes.
+
+Visualization terminal panes use the separate `visualization-viewer` role and remain available for independent diagrams. If a Plan Board or viewer pane becomes stale, its process identity changes, its owner is lost, or the user presses `q`, the integration verifies the dedicated process before closing/recovering it; otherwise it leaves the live pane untouched and retires only its binding. Existing browser and terminal viewer files remain preserved.
 
 For reproducible releases, replace `#main` references with version tags such as `#v0.1.0` after tagging the feature repositories.

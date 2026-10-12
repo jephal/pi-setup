@@ -18,28 +18,34 @@
     "README.md",
     "install.sh",
     "LICENSE",
+    "THIRD-PARTY-NOTICES",
     "extensions",
     "src",
+    "viewer/dist",
+    "viewer/package.json",
+    "viewer/package-lock.json",
     "skills",
     "agents",
     "prompts"
   ],
   "scripts": {
+    "build:viewer": "npm --prefix viewer ci && npm --prefix viewer run build",
+    "check:package": "node scripts/verify-package.mjs",
     "test": "node --experimental-strip-types --test extensions/*.test.ts"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.6.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "callscript": "0.1.5",
+    "grok-mermaid": "^0.2.2",
     "pi-fovea": "git+https://github.com/jephal/pi-fovea.git#v0.18.5-agent-safe.2"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-agent-core": "^1.1.0",
+    "@earendil-works/pi-ai": "^1.1.0",
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@earendil-works/pi-tui": "^1.1.0",
     "typebox": "*"
   },
   "pi": {
@@ -51,7 +57,7 @@
       "extensions/scheduled-tasks.ts",
       "extensions/notes.ts",
       "extensions/repo-search.ts",
-      "extensions/pi-program.ts",
+      "extensions/visualization.ts",
       "extensions/approval-modes.ts",
       "extensions/memory.ts",
       "node_modules/pi-fovea/src/index.ts",
