@@ -1,15 +1,15 @@
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { OTHER_OPTION_LABEL, createEditableOptionsComponent } from "../src/pi-ui/index.ts";
+import { createEditableOptionsComponent } from "../src/pi-ui/index.ts";
 import { Markdown } from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { checklistMarkdown, PLAN_BOARD_GUIDANCE, PLAN_MODE_TOOL_ACCESS, PLAN_MODE_WRITING_STYLE, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice } from "./plan-text.ts";
+import { PLAN_BOARD_GUIDANCE, PLAN_CONTEXT_GUIDANCE, STRICT_PLAN_MODE_GUIDANCE, checklistMarkdown, parseChecklistMarkdown, PLAN_TOOL_DESCRIPTION, PLAN_TOOL_PROMPT_GUIDELINES, PLAN_TOOL_PROMPT_SNIPPET, planUpdateNotice, taskListWidgetLines } from "./plan-text.ts";
 import { clearedPlanBoardSnapshot, projectPlanBoard } from "./plan-board.ts";
-import { isPlanModeToolAllowed, isReviewModeToolAllowed, isSafePlanBash, PLAN_TOOLS, readOnlyToolNames, REVIEW_TOOLS, restoreActiveTools } from "./approval-tools.ts";
+import { isPlanModeToolAllowed, isReviewModeToolAllowed, isSafeReadOnlyBash, readOnlyToolNames, PLAN_TOOLS, REVIEW_TOOLS, restoreActiveTools } from "./approval-tools.ts";
 import { withHerdrBlock } from "./herdr-blocking.ts";
 
 const MODES = ["manual", "approve", "auto", "review", "plan"] as const;
@@ -44,6 +44,12 @@ function parseMode(value: string): ApprovalMode | undefined {
 	if (normalized === "auto" || normalized === "automatic") return "auto";
 	if (normalized === "review" || normalized === "reviewing") return "review";
 	if (normalized === "plan" || normalized === "planning") return "plan";
+	return undefined;
+}
+
+function restoreMode(value: unknown): ApprovalMode | undefined {
+	if (isMode(value)) return value;
+	if (value === "planning") return "plan";
 	return undefined;
 }
 
@@ -141,25 +147,6 @@ function isCompleted(step: LocalPlanStep): boolean {
 	return ["complete", "completed", "done"].includes(step.status.trim().toLowerCase());
 }
 
-function checkpointMarkdown(content: string, steps: LocalPlanStep[]): string {
-	const markdown = content.trim();
-	if (!steps.length || /^##\s+task checkpoints\s*$/im.test(markdown)) return markdown;
-	const lines = steps.map((step) => `- [${isCompleted(step) ? "x" : " "}] ${step.id}. ${step.title}`);
-	return `${markdown}\n\n## Task checkpoints\n\n${lines.join("\n")}`;
-}
-
-function checkpointWidgetLines(plan: LocalPlan): string[] {
-	const completed = plan.steps.filter(isCompleted).length;
-	return [
-		`Task checkpoints · ${completed}/${plan.steps.length}`,
-		...plan.steps.map((step) => {
-			const status = step.status.trim().toLowerCase();
-			const marker = isCompleted(step) ? "☑" : status === "in_progress" ? "◐" : "☐";
-			return `${marker} ${step.id}. ${step.title}`;
-		}),
-	];
-}
-
 function assistantText(message: unknown): string {
 	if (!message || typeof message !== "object") return "";
 	const value = message as { role?: unknown; content?: unknown };
@@ -197,7 +184,16 @@ function emitLocalPlanBoard(pi: ExtensionAPI, ctx: ExtensionContext, plan: Local
 
 function updateCheckpointWidget(ctx: ExtensionContext, plan: LocalPlan | undefined): void {
 	if (!ctx.hasUI) return;
-	ctx.ui.setWidget("plan-checkpoints", plan?.execution?.active && plan.steps.length ? checkpointWidgetLines(plan) : undefined, { placement: "aboveEditor" });
+	ctx.ui.setWidget("plan-checkpoints", plan?.steps.length ? taskListWidgetLines(plan.steps) : undefined, { placement: "aboveEditor" });
+}
+
+function planReviewOptions() {
+	return [
+		{ key: "approve-auto", label: "Approve — start execution in Auto mode", description: "Leave strict Plan mode and continue without per-tool approval prompts.", editable: false },
+		{ key: "approve-edits", label: "Approve — start execution with code-edit approvals", description: "Leave strict Plan mode while keeping bash calls gated.", editable: false },
+		{ key: "edit-task-list", label: "Edit task list", description: "Revise the numbered task list and review it again.", editable: false },
+		{ key: "keep-planning", label: "Keep planning", description: "Remain read-only in Plan mode and continue the conversation.", editable: false },
+	];
 }
 
 function queuePlanUpdateExplanation(pi: ExtensionAPI, previous: LocalPlan, next: LocalPlan): void {
@@ -207,15 +203,6 @@ function queuePlanUpdateExplanation(pi: ExtensionAPI, previous: LocalPlan, next:
 		display: false,
 		details: { previousName: previous.name, nextName: next.name },
 	}, { deliverAs: "steer" });
-}
-
-function reviewOptions() {
-	return [
-		{ key: "approve-auto", label: "Approve — start execution in Auto mode", description: "Leave Plan mode and continue without per-tool approval prompts.", editable: false },
-		{ key: "approve-edits", label: "Approve — start execution with code-edit approvals", description: "Leave Plan mode while keeping bash calls gated.", editable: false },
-		{ key: "edit-plan", label: "Edit the plan", description: "Change the plan and review it again.", editable: false },
-		{ key: "feedback", label: OTHER_OPTION_LABEL, description: "Press Enter or Tab to write feedback and continue refining in Plan mode.", isOther: true },
-	];
 }
 
 function explainToolCall(toolName: string, input: Record<string, unknown>): string {
@@ -252,8 +239,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	const approvalFeedback = new Map<string, string>();
 
 
-	// pi-plan-mode is the preferred plan owner in the combined setup. Keep this
-	// fallback for users who install approval modes by itself, but never register
+	// The dedicated plans extension is the preferred plan owner in the combined
+	// setup. Keep this fallback when approval modes is installed by itself, but never register
 	// a second plan tool when another package already provides one. The marker is
 	// used because getAllTools() is not available during extension loading.
 	if (ownsPlanTool) {
@@ -266,15 +253,11 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("status"), Type.Literal("clear")]),
 			name: Type.Optional(Type.String()),
-			content: Type.Optional(Type.String()),
-			steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.Integer()), title: Type.String(), status: Type.Optional(Type.String()) }))),
+			steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.Integer()), title: Type.String({ description: "Short numbered task text for the above-editor list" }), status: Type.Optional(Type.String()) }))),
 		}),
 		renderCall(params, _theme, _context) {
-			// Keep the fallback plan in the ordinary tool transcript. The shared
-			// pi-ui component is reserved for the review/feedback gate.
 			const steps = (params.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" }));
-			const content = params.content?.trim() || (steps.length ? checklistMarkdown(params.name?.trim() || "current-checklist", steps) : "Preparing checklist…");
-			return new Markdown(checkpointMarkdown(content, steps), 1, 0, getMarkdownTheme());
+			return new Markdown(steps.length ? checklistMarkdown(params.name?.trim() || "current-task-list", steps) : "Preparing task list…", 1, 0, getMarkdownTheme());
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const identity = await planIdentity(pi, ctx);
@@ -287,87 +270,81 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			}
 			if (params.action === "status") {
 				const plan = await loadLocalPlan(identity);
-				const label = plan?.kind === "checklist" ? "Active checklist" : "Active plan";
-				return { content: [{ type: "text", text: plan ? `${label} for ${identity.branch}:\n${plan.content}` : `No active plan for ${identity.branch}.` }], details: plan ? { identity, plan } : { identity } };
+				const tasks = plan?.steps.length ? checklistMarkdown(plan.name, plan.steps) : "- No task steps saved";
+				return { content: [{ type: "text", text: plan ? `Task list · ${plan.name}\n${tasks}` : `No task list for ${identity.branch}.` }], details: plan ? { identity, plan } : { identity } };
 			}
 			const previous = await loadLocalPlan(identity);
-			if (mode !== "plan") {
-				if (params.content?.trim()) throw new Error("Outside Plan mode, create/update accepts checklist steps only. Enter Plan mode for a full Markdown plan.");
-				const steps = (params.steps ?? previous?.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" }));
-				if (!steps.length) throw new Error("Outside Plan mode, create/update requires at least one checklist step. Enter Plan mode for a full Markdown plan.");
-				const name = params.name?.trim() || previous?.name || "current-checklist";
-				const plan: LocalPlan = {
-					name,
-					kind: previous?.execution?.active ? (previous.kind ?? "plan") : "checklist",
-					content: previous?.execution?.active ? previous.content : checklistMarkdown(name, steps),
-					steps,
-					identity,
-					updatedAt: new Date().toISOString(),
-					execution: previous?.execution?.active ? previous.execution : undefined,
-				};
-				const filePath = await saveLocalPlan(plan);
-				emitLocalPlanBoard(pi, ctx, plan);
-				if (plan.execution?.active) {
-					activeExecutionPlan = plan;
-					updateCheckpointWidget(ctx, plan);
-				}
-				return { content: [{ type: "text", text: `Saved checklist for branch ${identity.branch}: ${filePath}` }], details: { plan, checklistOnly: true } };
-			}
-			if (!params.content?.trim()) throw new Error("plan create/update requires complete Markdown content");
-			let plan: LocalPlan = {
-				name: params.name?.trim() || previous?.name || "current-plan",
-				kind: "plan",
-				content: params.content,
-				steps: (params.steps ?? previous?.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" })),
+			const steps = (params.steps ?? previous?.steps ?? []).map((step, index) => ({ id: Number(step.id ?? index + 1), title: step.title, status: step.status ?? "pending" }));
+			if (!steps.length) throw new Error("plan create/update requires at least one numbered task step.");
+			const name = params.name?.trim() || previous?.name || "current-task-list";
+			const plan: LocalPlan = {
+				name,
+				kind: "checklist",
+				content: checklistMarkdown(name, steps),
+				steps,
 				identity,
 				updatedAt: new Date().toISOString(),
-				execution: previous?.execution,
+				execution: mode === "plan" ? undefined : previous?.execution,
 			};
-			for (;;) {
-				const filePath = await saveLocalPlan(plan);
-				emitLocalPlanBoard(pi, ctx, plan);
-				if (plan.execution?.active && mode !== "plan") {
-					activeExecutionPlan = plan;
-					updateCheckpointWidget(ctx, plan);
-				}
-				if (!ctx.hasUI || mode !== "plan") {
-					if (mode === "plan" && params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-					return { content: [{ type: "text", text: `Saved plan to ${filePath}.` }], details: { plan } };
-				}
-				const review = await withHerdrBlock(pi, "Waiting for plan review", () => ctx.ui.custom<{ key: string; edit?: string } | null>(
-					(tui, theme, _keybindings, done) => createEditableOptionsComponent(tui, theme, done, {
-						title: `Review plan · ${plan.name}`,
-						options: reviewOptions(),
-						initialFocus: "options",
-					}),
-				));
-				if (!review) {
-					if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-					return { content: [{ type: "text", text: `Plan saved to ${filePath}. Review cancelled; remaining in Plan mode.` }], details: { plan, cancelled: true } };
-				}
-				if (review.key === "edit-plan") {
-					const edited = await withHerdrBlock(pi, "Waiting for plan edits", () => ctx.ui.editor("Edit plan", plan.content));
-					if (edited?.trim()) { plan = { ...plan, content: edited, updatedAt: new Date().toISOString() }; emitLocalPlanBoard(pi, ctx, plan); }
+			if (mode !== "review" && mode !== "plan" && !plan.execution?.active) plan.execution = { active: true, startedAt: new Date().toISOString() };
+			let filePath = await saveLocalPlan(plan);
+			emitLocalPlanBoard(pi, ctx, plan);
+			activeExecutionPlan = plan.execution?.active ? plan : undefined;
+			updateCheckpointWidget(ctx, plan);
+			if (mode === "plan" && ctx.hasUI) {
+				for (;;) {
+					const review = await withHerdrBlock(pi, "Waiting for task-list review", () => ctx.ui.custom<{ key: string } | null>(
+						(tui, theme, _keybindings, done) => createEditableOptionsComponent(tui, theme, done, {
+							title: `Review task list · ${plan.name}`,
+							options: planReviewOptions(),
+							initialFocus: "options",
+						}),
+					));
+					if (!review) {
+						if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+						return { content: [{ type: "text", text: `Task list saved to ${filePath}. Remain in Plan mode; execution is still gated.` }], details: { plan, cancelled: true, executionReady: false } };
+					}
+					if (review.key === "edit-task-list") {
+						const edited = await withHerdrBlock(pi, "Waiting for task-list edits", () => ctx.ui.editor("Edit numbered task list", checklistMarkdown(plan.name, plan.steps)));
+						if (edited?.trim()) {
+							const editedSteps = parseChecklistMarkdown(edited);
+						if (editedSteps.length) {
+							plan.steps = editedSteps;
+							plan.content = checklistMarkdown(plan.name, editedSteps);
+							plan.updatedAt = new Date().toISOString();
+							filePath = await saveLocalPlan(plan);
+							emitLocalPlanBoard(pi, ctx, plan);
+							updateCheckpointWidget(ctx, plan);
+						} else {
+							ctx.ui.notify("Keep at least one numbered task in the list.", "warning");
+						}
+					}
 					continue;
 				}
-				if (review.key === "feedback") {
-					const feedback = review.edit?.trim() ?? "";
+					if (review.key === "keep-planning") {
+						if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+						return { content: [{ type: "text", text: `Task list saved to ${filePath}. Stay in Plan mode to continue the discussion.` }], details: { plan, executionReady: false } };
+					}
+					const nextMode = review.key === "approve-auto" ? "auto" : "approve";
+					const modeLabel = nextMode === "auto" ? "Auto mode" : "code-edit approvals";
+					const announcement = `Task list approved. Leaving Plan mode and starting execution with ${modeLabel}.`;
+					plan.execution = plan.steps.length ? { active: true, startedAt: new Date().toISOString() } : undefined;
+					activeExecutionPlan = plan.execution?.active ? plan : undefined;
+					filePath = await saveLocalPlan(plan);
+					emitLocalPlanBoard(pi, ctx, plan);
+					updateCheckpointWidget(ctx, plan);
+					ctx.ui.notify(announcement, "info");
+					pi.events.emit("approval-mode:set", { mode: nextMode });
 					if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-					return { content: [{ type: "text", text: `Keep planning. User feedback: ${feedback || "Please refine the plan."}` }], details: { plan, feedback } };
+					return { content: [{ type: "text", text: `[PLAN MODE EXITED]\n${announcement}\nBegin implementation from the numbered task list.` }], details: { plan, choice: review.key, nextMode, executionReady: true, planModeExited: true } };
 				}
-				const nextMode = review.key === "approve-auto" ? "auto" : "approve";
-				const modeLabel = nextMode === "auto" ? "Auto mode" : "code-edit approvals";
-				const announcement = `Plan approved. Leaving Plan mode and starting execution with ${modeLabel}.`;
-				plan.execution = plan.steps.length ? { active: true, startedAt: new Date().toISOString() } : undefined;
-				activeExecutionPlan = plan;
-				await saveLocalPlan(plan);
-				emitLocalPlanBoard(pi, ctx, plan);
-				updateCheckpointWidget(ctx, plan);
-				ctx.ui.notify(announcement, "info");
-				pi.events.emit("approval-mode:set", { mode: nextMode });
-				if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
-				return { content: [{ type: "text", text: `[PLAN MODE EXITED]\n${announcement}\nThe plan is approved. Begin the implementation now; do not continue planning.` }], details: { plan, choice: review.key, nextMode, executionReady: true, planModeExited: true } };
 			}
+			if (params.action === "update" && previous) queuePlanUpdateExplanation(pi, previous, plan);
+			const executionReady = mode !== "review" && mode !== "plan";
+			const next = executionReady
+				? "Continue with the numbered task list under the current approval mode."
+				: mode === "review" ? "Review mode remains read-only; do not execute implementation work." : "Remain in read-only Plan mode until the task list is approved.";
+			return { content: [{ type: "text", text: `Saved task list for branch ${identity.branch}: ${filePath}. ${next}` }], details: { plan, executionReady } };
 		},
 	});
 	const boardRequest = async <T extends Record<string, unknown>>(event: string, value: T): Promise<Record<string, unknown>> => {
@@ -428,20 +405,13 @@ export default function approvalModes(pi: ExtensionAPI): void {
 	}
 
 	function persist(): void {
-		pi.appendEntry("approval-mode", {
-			mode,
-			modeBeforePlan,
-		} satisfies PersistedState);
+		pi.appendEntry("approval-mode", { mode, modeBeforePlan } satisfies PersistedState);
 	}
 
 	function restoreTools(): void {
 		if (toolsBeforePlan) pi.setActiveTools(restoreActiveTools(toolsBeforePlan, pi.getActiveTools(), temporaryReadOnlyTools));
 		toolsBeforePlan = undefined;
 		temporaryReadOnlyTools = undefined;
-	}
-
-	function planToolNames(mode: ApprovalMode): string[] {
-		return readOnlyToolNames(mode, pi.getAllTools().map((tool) => tool.name));
 	}
 
 	function isReadOnlyMode(value: ApprovalMode): boolean {
@@ -452,13 +422,11 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		const wasReadOnly = isReadOnlyMode(previous);
 		const isReadOnly = isReadOnlyMode(next);
 		if (isReadOnly && !wasReadOnly) {
-			// Take one snapshot when entering the restricted tool policy. Plan
-			// mode has the broader non-code-changing set; Review stays conservative.
 			toolsBeforePlan = pi.getActiveTools();
 		}
 		if (isReadOnly) {
-			temporaryReadOnlyTools = next === "plan" ? PLAN_TOOLS : REVIEW_TOOLS;
-			pi.setActiveTools(planToolNames(next));
+			temporaryReadOnlyTools = new Set([...PLAN_TOOLS, ...REVIEW_TOOLS]);
+			pi.setActiveTools(readOnlyToolNames(next, pi.getAllTools().map((tool) => tool.name)));
 		} else if (wasReadOnly) {
 			restoreTools();
 		}
@@ -466,15 +434,14 @@ export default function approvalModes(pi: ExtensionAPI): void {
 
 	function announcePlanBoundary(previous: ApprovalMode, next: ApprovalMode): void {
 		if (previous !== "plan" && next !== "plan") return;
-		const entered = next === "plan";
-		const transition = entered
-			? "[PLAN MODE ENTERED] You are now in read-only Plan mode. Create or refine the plan; do not edit files or execute implementation work."
-			: `[PLAN MODE EXITED] Planning is complete. You are now in ${MODE_LABELS[next]} mode; begin implementation instead of continuing to plan.`;
+		const entering = next === "plan";
 		pi.sendMessage({
 			customType: "approval-mode-transition",
-			content: transition,
+			content: entering
+				? "[PLAN MODE ENTERED] Strict read-only planning is active. Save only the numbered task list and wait for approval before execution."
+				: `[PLAN MODE EXITED] Planning gate is closed. Follow the existing ${MODE_LABELS[next]} mode permissions.`,
 			display: false,
-			details: { from: previous, to: next, planMode: entered },
+			details: { from: previous, to: next, planMode: entering },
 		}, { deliverAs: "nextTurn" });
 	}
 
@@ -567,20 +534,16 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		if (HITL_TOOLS.has(event.toolName) || mode === "auto") return;
 
 		if (isReadOnlyMode(mode)) {
-			const allowed = mode === "plan" ? isPlanModeToolAllowed(event.toolName, event.input) : isReviewModeToolAllowed(event.toolName, event.input);
+			const allowed = mode === "plan"
+				? isPlanModeToolAllowed(event.toolName, event.input)
+				: isReviewModeToolAllowed(event.toolName, event.input);
 			if (!allowed) {
 				return { block: true, reason: `${MODE_LABELS[mode]} mode is read-only: this tool is disabled.` };
 			}
 			if (event.toolName === "bash") {
 				const command = typeof event.input.command === "string" ? event.input.command : "";
-				if (!isSafePlanBash(command)) {
+				if (!isSafeReadOnlyBash(command)) {
 					return { block: true, reason: `${MODE_LABELS[mode]} mode only allows simple read-only bash commands.` };
-				}
-			}
-			if (mode === "plan" && event.toolName === "herdr_shell" && (event.input.action === "open" || event.input.action === "run") && event.input.command) {
-				const command = typeof event.input.command === "string" ? event.input.command : "";
-				if (!isSafePlanBash(command)) {
-					return { block: true, reason: "Plan mode only allows simple read-only Herdr commands." };
 				}
 			}
 			return;
@@ -644,7 +607,7 @@ export default function approvalModes(pi: ExtensionAPI): void {
 				currentPlanIdentity = nextIdentity;
 				const loadedPlan = await loadLocalPlan(nextIdentity);
 				activeExecutionPlan = loadedPlan?.execution?.active ? loadedPlan : undefined;
-				updateCheckpointWidget(ctx, activeExecutionPlan);
+				updateCheckpointWidget(ctx, loadedPlan);
 				// Branch/worktree changes replace the board even when the new scope
 				// has only a draft or no plan.
 				emitLocalPlanBoard(pi, ctx, loadedPlan);
@@ -654,16 +617,14 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			manual: "Every tool call requires user approval, except ask_questions which is already human-in-the-loop. Do not assume a tool call is allowed.",
 			approve: "Read tools, edit, and write may run directly. Every bash call requires user approval. ask_questions is already human-in-the-loop and is not gated twice.",
 			auto: "Tools may run without an approval prompt.",
-			review: "You are in read-only review mode. Do not edit or write files. Inspect and explain the code, and create a review plan when useful, but do not make changes.",
-			plan: `You are in read-only Plan mode for project code. ${PLAN_MODE_TOOL_ACCESS}`,
+			review: "You are in read-only review mode for project files. Do not edit or write project files or perform implementation. You may use the plan tool to save a task list, but do not execute it.",
+			plan: "You are in strict read-only Plan mode. Do not modify project files or execute implementation work before the task-list review gate is approved.",
 		};
-		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n`;
-		content += mode === "plan"
-			? `Use the plan tool for substantial work; create or refine the full Markdown plan and wait for its review selector before executing. ${PLAN_MODE_WRITING_STYLE}\n`
-			: "Outside Plan mode, use the plan tool only for a short checklist for a small task. Do not use it to plan substantial work; enter Plan mode first. If an approved plan returns PLAN MODE EXITED or executionReady, begin implementation.\n";
-		if (ownsPlanTool && activeExecutionPlan?.execution?.active && activeExecutionPlan.steps.length > 0) {
+		let content = `[APPROVAL MODE: ${MODE_LABELS[mode]}]\n${instructions[mode]}\n\n${PLAN_CONTEXT_GUIDANCE} If a saved task list returns executionReady, begin implementation under the current mode's permissions.\n`;
+		if (mode === "plan") content += `${STRICT_PLAN_MODE_GUIDANCE}\n\n`;
+		if (ownsPlanTool && mode !== "review" && mode !== "plan" && activeExecutionPlan?.execution?.active && activeExecutionPlan.steps.length > 0) {
 			const remaining = activeExecutionPlan.steps.filter((step) => !isCompleted(step));
-			content += `[PLAN CHECKPOINTS ACTIVE]\nRemaining checkpoints:\n${remaining.map((step) => `${step.id}. ${step.title}`).join("\n")}\nAfter completing each individual checkpoint, immediately include [DONE:n] in your next response using its step id; do not wait until all checkpoints are complete. Then continue with the next remaining checkpoint.\n\n`;
+			content += `[TASK LIST ACTIVE]\nRemaining tasks:\n${remaining.map((step) => `${step.id}. ${step.title}`).join("\n")}\nAfter completing each individual task, immediately include [DONE:n] in your next response using its task number; then continue with the next task.\n\n`;
 		}
 		return {
 			message: {
@@ -683,8 +644,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			| undefined;
 		const flagMode = pi.getFlag("approval-mode");
 		const savedMode = saved?.data?.mode;
-		const requested = isMode(flagMode) ? flagMode : isMode(savedMode) ? savedMode : "auto";
-		modeBeforePlan = isMode(saved?.data?.modeBeforePlan) ? saved.data.modeBeforePlan : "auto";
+		const requested = restoreMode(flagMode) ?? restoreMode(savedMode) ?? "auto";
+		modeBeforePlan = restoreMode(saved?.data?.modeBeforePlan) ?? "auto";
 		mode = requested;
 		applyToolPolicy("auto", mode);
 		pi.events.emit("approval-mode:changed", { mode });
@@ -694,13 +655,13 @@ export default function approvalModes(pi: ExtensionAPI): void {
 		currentPlanIdentity = identity;
 		const loadedPlan = await loadLocalPlan(identity);
 		activeExecutionPlan = loadedPlan?.execution?.active ? loadedPlan : undefined;
-		updateCheckpointWidget(ctx, activeExecutionPlan);
+		updateCheckpointWidget(ctx, loadedPlan);
 		// Reconcile every loaded state so a reload cannot display a prior branch.
 		emitLocalPlanBoard(pi, ctx, loadedPlan);
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
-		if (!ownsPlanTool) return;
+		if (!ownsPlanTool || mode === "review" || mode === "plan") return;
 		const plan = activeExecutionPlan;
 		if (!plan?.execution?.active) return;
 		if (!markCompletedCheckpoints(plan, assistantText(event.message))) return;
@@ -710,8 +671,8 @@ export default function approvalModes(pi: ExtensionAPI): void {
 			await saveLocalPlan(plan);
 			emitLocalPlanBoard(pi, ctx, plan);
 			activeExecutionPlan = undefined;
-			updateCheckpointWidget(ctx, undefined);
-			ctx.ui.notify(`All task checkpoints complete for ${plan.name}.`, "info");
+			updateCheckpointWidget(ctx, plan);
+			ctx.ui.notify(`All tasks complete for ${plan.name}.`, "info");
 			return;
 		}
 		await saveLocalPlan(plan);

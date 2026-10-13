@@ -1,118 +1,100 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isPlanModeToolAllowed, isPlanModeVisualizationAllowed, isReviewModeToolAllowed, isReviewModeVisualizationAllowed, isSafePlanBash, PLAN_TOOLS, readOnlyToolNames, restoreActiveTools, REVIEW_TOOLS } from "./approval-tools.ts";
+import { isPlanModeToolAllowed, isPlanModeVisualizationAllowed, isReviewModeToolAllowed, isReviewModeVisualizationAllowed, isSafeReadOnlyBash, readOnlyToolNames, restoreActiveTools, PLAN_TOOLS, REVIEW_TOOLS } from "./approval-tools.ts";
 import approvalModes from "./approval-modes.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-test("Plan mode bash safety rejects mutating Git commands and shell composition", () => {
-	assert.equal(isSafePlanBash("git status --short"), true);
-	assert.equal(isSafePlanBash("git branch -D feature"), false);
-	assert.equal(isSafePlanBash("git remote add origin https://example.test"), false);
-	assert.equal(isSafePlanBash("git status && rm -rf ."), false);
-	assert.equal(isSafePlanBash("git rev-parse --show-toplevel"), true);
+test("read-only mode bash safety rejects mutating Git commands and shell composition", () => {
+	assert.equal(isSafeReadOnlyBash("git status --short"), true);
+	assert.equal(isSafeReadOnlyBash("git branch -D feature"), false);
+	assert.equal(isSafeReadOnlyBash("git remote add origin https://example.test"), false);
+	assert.equal(isSafeReadOnlyBash("git status && rm -rf ."), false);
+	assert.equal(isSafeReadOnlyBash("git rev-parse --show-toplevel"), true);
 });
 
-test("Plan and Review modes keep context tools while filtering visual side effects", () => {
-	for (const tool of ["notes_list", "notes_read", "fovea_focus", "tool_search", "scheduled_task_list", "repo_search"]) {
-		assert.equal(PLAN_TOOLS.has(tool), true, tool);
-	}
-	for (const tool of ["notes_write", "notes_transfer", "notes_save", "notes_git", "memory", "herdr_shell", "scheduled_task_create", "scheduled_task_delete", "scheduled_task_run_now"]) {
-		assert.equal(PLAN_TOOLS.has(tool), false, tool);
+test("Review keeps planning and previews available but blocks writes and persistent visuals", () => {
+	for (const tool of ["plan", "repo_search", "plan_board", "visualize", "tool_search"]) {
+		assert.equal(REVIEW_TOOLS.has(tool), true, tool);
 	}
 	assert.equal(REVIEW_TOOLS.has("notes_list"), false);
-	assert.equal(REVIEW_TOOLS.has("repo_search"), true);
-	assert.equal(REVIEW_TOOLS.has("visualize"), true);
-	assert.equal(REVIEW_TOOLS.has("plan_board"), true);
-	assert.equal(PLAN_TOOLS.has("plan_board"), true);
-	assert.equal(isPlanModeToolAllowed("mcp__datadog__logs"), true);
-	assert.equal(isPlanModeToolAllowed("mcp__datadog__create_monitor"), false);
-	assert.equal(isPlanModeToolAllowed("write"), false);
-	assert.equal(isPlanModeVisualizationAllowed({ action: "preview", format: "mermaid", source: "graph TD\nA" }), true);
+	assert.equal(isReviewModeToolAllowed("plan"), true);
+	assert.equal(isReviewModeToolAllowed("write"), false);
+	assert.equal(isReviewModeToolAllowed("mcp__datadog__logs"), true);
+	assert.equal(isReviewModeToolAllowed("mcp__datadog__create_monitor"), false);
 	assert.equal(isReviewModeVisualizationAllowed({ action: "preview", format: "mermaid", source: "graph TD\nA" }), true);
 	assert.equal(isReviewModeVisualizationAllowed({ action: "viewer", format: "excalidraw", nodes: [{ id: "a", label: "A" }] }), true);
-	assert.equal(isReviewModeVisualizationAllowed({ action: "viewer", target: "terminal_viewer", format: "excalidraw", nodes: [{ id: "a", label: "A" }] }), false);
-	assert.equal(isReviewModeVisualizationAllowed({ action: "artifact", format: "excalidraw", nodes: [{ id: "a", label: "A" }], path: "a.excalidraw" }), false);
-	assert.equal(isPlanModeVisualizationAllowed({ action: "preview", format: "excalidraw", nodes: [{ id: "a", label: "A" }] }), true);
-	assert.equal(isPlanModeVisualizationAllowed({ action: "preview", format: "excalidraw", target: "plan_board", nodes: [{ id: "a", label: "A" }] }), true);
-	assert.equal(isPlanModeVisualizationAllowed({ action: "preview", format: "excalidraw", target: "close", nodes: [{ id: "a", label: "A" }] }), false);
-	assert.equal(isPlanModeVisualizationAllowed({ action: "preview", format: "mermaid", target: "terminal_viewer", source: "graph TD\nA" }), false);
-	assert.equal(isPlanModeVisualizationAllowed({ action: "artifact" }), false);
-	assert.equal(isPlanModeVisualizationAllowed(undefined), false);
-	assert.equal(isPlanModeVisualizationAllowed(null), false);
-	assert.equal(isPlanModeVisualizationAllowed({}), false);
+	assert.equal(isReviewModeVisualizationAllowed({ action: "terminal_viewer", target: "open" }), false);
+	assert.equal(isReviewModeVisualizationAllowed({ action: "artifact" }), false);
+	assert.deepEqual(
+		readOnlyToolNames("review", ["read", "plan", "repo_search", "visualize", "tool_search", "notes_list", "memory"]),
+		["read", "plan", "repo_search", "visualize", "tool_search"],
+	);
+});
+
+test("strict Plan mode has a broader read-only tool set and only permits visualization previews", () => {
+	for (const tool of ["notes_list", "notes_read", "fovea_focus", "scheduled_task_list", "tool_search", "repo_search"]) {
+		assert.equal(PLAN_TOOLS.has(tool), true, tool);
+	}
+	for (const tool of ["notes_write", "memory", "herdr_shell", "scheduled_task_create", "scheduled_task_delete"]) {
+		assert.equal(PLAN_TOOLS.has(tool), false, tool);
+	}
+	assert.equal(isPlanModeToolAllowed("mcp__datadog__logs"), true);
+	assert.equal(isPlanModeToolAllowed("mcp__datadog__create_monitor"), false);
 	assert.equal(isPlanModeToolAllowed("visualize", { action: "preview", format: "mermaid", source: "graph TD\nA" }), true);
 	assert.equal(isPlanModeToolAllowed("visualize", { action: "artifact" }), false);
-	assert.equal(isReviewModeToolAllowed("visualize", { action: "viewer", format: "excalidraw", nodes: [{ id: "a", label: "A" }] }), true);
-	assert.equal(isReviewModeToolAllowed("visualize", { action: "artifact" }), false);
-	assert.equal(isPlanModeToolAllowed("visualize"), false);
-	const available = ["read", "plan", "repo_search", "visualize", "notes_list", "memory", "fovea_focus", "mcp__datadog__logs"];
-	assert.deepEqual(readOnlyToolNames("review", available), ["read", "plan", "repo_search", "visualize"]);
-	assert.deepEqual(readOnlyToolNames("plan", available), ["read", "plan", "repo_search", "visualize", "notes_list", "fovea_focus"]);
+	assert.equal(isPlanModeVisualizationAllowed({ action: "viewer", format: "excalidraw" }), false);
+	assert.deepEqual(readOnlyToolNames("plan", ["read", "plan", "repo_search", "notes_list", "fovea_focus", "tool_search"]), ["read", "plan", "repo_search", "tool_search", "notes_list", "fovea_focus"]);
 });
 
-test("leaving read-only mode preserves dynamically activated tools", () => {
+test("leaving Review mode preserves dynamically activated tools", () => {
 	assert.deepEqual(
 		restoreActiveTools(
-			["read", "notes_admin_tools", "tool_search"],
-			["read", "grep", "plan", "notes_list", "mcp__datadog__logs", "notes_list"],
+			["read", "tool_search"],
+			["read", "grep", "plan", "tool_search", "mcp__datadog__logs"],
 		),
-		["read", "notes_admin_tools", "tool_search", "notes_list", "mcp__datadog__logs"],
-	);
-	assert.deepEqual(
-		restoreActiveTools(
-			["read"],
-			["read", "notes_list", "fovea_focus", "mcp__datadog__logs"],
-			PLAN_TOOLS,
-		),
-		["read", "mcp__datadog__logs"],
+		["read", "tool_search", "mcp__datadog__logs"],
 	);
 });
 
-test("session start restores persisted Plan mode before the first tool call", async () => {
+test("persisted strict Plan mode restores read-only policy before the first tool call", async () => {
 	const handlers = new Map<string, (...args: any[]) => any>();
-	let activeTools = ["read", "visualize"];
+	const commands = new Map<string, { handler: (...args: any[]) => any; getArgumentCompletions?: () => Array<{ value: string }> }>();
+	const flags = new Map<string, { description: string }>();
+	const notices: string[] = [];
+	let activeTools = ["read", "bash", "edit", "visualize"];
 	let changedMode = "";
 	const fakePi = {
-		registerTool() {}, registerFlag() {}, registerShortcut() {}, registerCommand() {},
+		registerTool() {}, registerFlag(name: string, definition: { description: string }) { flags.set(name, definition); }, registerShortcut() {}, registerCommand(name: string, definition: { handler: (...args: any[]) => any; getArgumentCompletions?: () => Array<{ value: string }> }) { commands.set(name, definition); },
 		on(event: string, handler: (...args: any[]) => any) { handlers.set(event, handler); },
-		events: { on() {}, emit(event: string, value: { mode?: string }) { if (event === "approval-mode:changed") changedMode = value.mode || ""; } },
-		getAllTools() { return [{ name: "read" }, { name: "plan" }, { name: "visualize" }]; },
-		getActiveTools() { return activeTools; }, setActiveTools(value: string[]) { activeTools = value; },
+		events: {
+			on() {},
+			emit(event: string, value?: { mode?: string }) { if (event === "approval-mode:changed") changedMode = value?.mode || ""; },
+		},
+		getAllTools() { return ["read", "bash", "edit", "plan", "visualize", "repo_search", "tool_search"].map((name) => ({ name })); },
+		getActiveTools() { return activeTools; },
+		setActiveTools(value: string[]) { activeTools = value; },
 		appendEntry() {}, sendMessage() {}, async exec() { return { stdout: "" }; }, getFlag() { return undefined; },
 	};
 	approvalModes(fakePi as unknown as ExtensionAPI);
 	const context = {
-		hasUI: false, cwd: process.cwd(),
-		ui: { theme: { fg: (_color: string, value: string) => value }, setStatus() {}, notify() {} },
-		sessionManager: { getEntries() { return [{ type: "custom", customType: "approval-mode", data: { mode: "plan" } }]; }, getSessionId() { return "persisted-plan-test"; } },
-	} as any;
+		hasUI: false,
+		cwd: "/tmp/legacy-plan-mode-test",
+		ui: { theme: { fg: (_color: string, value: string) => value }, setStatus() {}, notify(value: string) { notices.push(value); } },
+		sessionManager: {
+			getEntries() { return [{ type: "custom", customType: "approval-mode", data: { mode: "plan" } }]; },
+			getSessionId() { return "legacy-plan-mode-test"; },
+		},
+	};
 	await handlers.get("session_start")?.({}, context);
 	assert.equal(changedMode, "plan");
-	assert.equal(activeTools.includes("visualize"), true);
-	const result = await handlers.get("tool_call")?.({ toolName: "visualize", toolCallId: "artifact", input: { action: "artifact" } }, context);
-	assert.match(result.reason, /read-only/);
-});
-
-test("registered Plan tool_call policy permits previews and blocks visualization artifacts", async () => {
-	const handlers = new Map<string, (...args: any[]) => any>();
-	const commands = new Map<string, { handler: (...args: any[]) => any }>();
-	let activeTools = ["read"];
-	const fakePi = {
-		registerTool() {}, registerFlag() {}, registerShortcut() {},
-		registerCommand(name: string, definition: { handler: (...args: any[]) => any }) { commands.set(name, definition); },
-		on(event: string, handler: (...args: any[]) => any) { handlers.set(event, handler); },
-		events: { on() {}, emit() {} },
-		getAllTools() { return [{ name: "read" }, { name: "plan" }, { name: "visualize" }]; },
-		getActiveTools() { return activeTools; }, setActiveTools(value: string[]) { activeTools = value; },
-		appendEntry() {}, sendMessage() {}, getFlag() { return "auto"; },
-	};
-	approvalModes(fakePi as unknown as ExtensionAPI);
-	const context = { hasUI: false, ui: { theme: { fg: (_color: string, value: string) => value }, setStatus() {}, notify() {} } } as any;
+	assert.match(flags.get("approval-mode")?.description ?? "", /plan/i);
+	assert.equal(commands.get("mode")!.getArgumentCompletions!().some((item) => item.value === "plan"), true);
 	await commands.get("mode")!.handler("plan", context);
-	assert.equal(activeTools.includes("visualize"), true);
-	const toolCall = handlers.get("tool_call")!;
-	assert.equal(await toolCall({ toolName: "visualize", toolCallId: "preview", input: { action: "preview", format: "mermaid", source: "graph TD\nA" } }, context), undefined);
-	assert.match((await toolCall({ toolName: "visualize", toolCallId: "artifact", input: { action: "artifact" } }, context)).reason, /read-only/);
-	assert.match((await toolCall({ toolName: "visualize", toolCallId: "missing", input: {} }, context)).reason, /read-only/);
-	assert.match((await toolCall({ toolName: "visualize", toolCallId: "null", input: null }, context)).reason, /read-only/);
+	assert.equal(notices.length, 0);
+	assert.equal(activeTools.includes("edit"), false);
+	assert.equal(activeTools.includes("plan"), true);
+	const callTool = handlers.get("tool_call")!;
+	assert.equal(await callTool({ toolName: "plan", toolCallId: "plan", input: {} }, context), undefined);
+	assert.equal(await callTool({ toolName: "visualize", toolCallId: "preview", input: { action: "preview", format: "mermaid", source: "graph TD\nA" } }, context), undefined);
+	assert.match((await callTool({ toolName: "visualize", toolCallId: "artifact", input: { action: "artifact" } }, context)).reason, /read-only/);
 });

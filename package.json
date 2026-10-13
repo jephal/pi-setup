@@ -54,7 +54,7 @@
       "extensions/temp-storage.ts",
       "extensions/subagent/index.ts",
       "extensions/ask-questions.ts",
-      "extensions/plan-mode.ts",
+      "extensions/plans.ts",
       "extensions/scheduled-tasks.ts",
       "extensions/notes.ts",
       "extensions/repo-search.ts",

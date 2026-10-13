@@ -54,19 +54,17 @@ This is the single GitHub-installable Pi package for Jeppe's workflow. Feature b
   - Disabled by default; enable it with `PI_ENABLE_DATADOG_MCP=1`
   - Uses native deferred MCP exposure and `tool_search` rather than a local CLI or custom loader
   - Restricts the hosted endpoint to the read-only `core`, `error-tracking`, and `rum` toolsets
-- Plan mode and Plan Board
-  - Branch/session-scoped authoritative plan storage
+- Planning and Plan Board
+  - Branch/session-scoped task-list storage and a `plan` tool available in every approval mode
+  - Saves only a concise numbered task list in the above-editor widget; users can discuss details in chat before saving
+  - Optional strict Plan mode keeps read-only exploration and the review/approve gate for developers who want it
+  - Strict Plan mode permits only read-only context tools and visualization previews until approved
+  - Other modes save the list and continue under their existing permissions; Review remains read-only
+  - Markdown task checkpoints and above-editor execution progress
   - Dedicated derived `plan-board` Herdr pane with explicit `plan_board` display actions
   - Bounded Markdown/checkpoint projection rendered with Pi's shared Markdown component, with safe plain-line fallback, Mermaid Unicode preprocessing, and optional Excalidraw ANSI scenes
   - Private 0600 socket snapshots with scrolling, redraw, revision checks, and safe recovery
-  - Concise plan review UI
   - Shared HITL decisions and feedback
-  - Markdown task checkpoints and above-editor execution progress
-  - Visible Plan → execution transitions
-  - Full Markdown plans in Plan mode; compact checklist-only tracking outside Plan mode
-  - Plan mode keeps read-only context tools available, including note listing/search/read, Fovea, Datadog investigation, scheduled-task listing, safe shell inspection, and visualization previews
-  - Plan mode does not write notes or memory, change schedules, run Herdr commands, edit project code, or write visualization artifacts
-  - Research first: Plan mode is for the final decision and execution contract, not initial research; scope and conclusion first, key decisions, rationale, trade-offs, risks, and next decision
 - Memory
   - Local SQLite-backed user and project memories
   - Main-agent-driven capture of stable patterns noticed during normal work
@@ -236,9 +234,9 @@ Use `action: "preview"` for Mermaid or Excalidraw previews; Mermaid and preview 
 
 The terminal renderer supports rectangles, diamonds, ellipses, lines/arrows, and text, with bounded `LR`/`TD` graph layout and plain labels. It bounds terminal dimensions, scene elements, labels, output bytes, control buffers, and world coordinates; line drawing is bounded by the canvas. Unsupported Excalidraw elements are omitted from geometry and label calculations with an on-screen notice, and narrow panes report clipped labels. ANSI styling is applied after display-column clipping, including CJK, emoji, and combining text. Non-TTY invocations print one bounded ANSI/Unicode frame and remain controllable through the socket.
 
-The existing browser viewer remains preserved and available, but is non-default: use `action: "viewer"`, `format: "excalidraw"`, and bounded structured `nodes`/`edges` when an external browser URL is explicitly needed. Pi starts a temporary HTTP server on `127.0.0.1` and returns a tokenized URL such as `http://127.0.0.1:<port>/viewer/?token=...`. Open that URL in a modern browser outside Herdr. The server exposes its current writable state to the browser; Plan and Review show a clear read-only canvas and do not queue writes. Browser scene writes preserve unknown fields and merge embedded file records by ID. Browser assets under `viewer/` and `viewer/dist/` remain intact. Review mode may start this browser viewer, but its canvas is read-only and the `visualize` tool rejects terminal-pane and artifact requests.
+The existing browser viewer remains preserved and available, but is non-default: use `action: "viewer"`, `format: "excalidraw"`, and bounded structured `nodes`/`edges` when an external browser URL is explicitly needed. Pi starts a temporary HTTP server on `127.0.0.1` and returns a tokenized URL such as `http://127.0.0.1:<port>/viewer/?token=...`. Open that URL in a modern browser outside Herdr. The server exposes its current writable state to the browser; Review shows a clear read-only canvas and does not queue writes. Browser scene writes preserve unknown fields and merge embedded file records by ID. Browser assets under `viewer/` and `viewer/dist/` remain intact. Review mode may start this browser viewer, but its canvas is read-only and the `visualize` tool rejects terminal-pane and artifact requests.
 
-The browser viewer is the official `@excalidraw/excalidraw` React application compiled into the package under `viewer/dist`. It uses only shipped local JavaScript, CSS, fonts, and other assets. The browser must support the bundled modern JavaScript and Excalidraw canvas APIs. Browser scene updates stay in memory, require the current revision, and are bounded; Pi closes the session server on reload or shutdown. Plan mode permits only `action: "preview"`, which does not start a server or write an artifact. Review mode permits the browser viewer only in read-only mode. Use `action: "artifact"` with an explicit project-relative `.excalidraw` path when a durable file is wanted.
+The browser viewer is the official `@excalidraw/excalidraw` React application compiled into the package under `viewer/dist`. It uses only shipped local JavaScript, CSS, fonts, and other assets. The browser must support the bundled modern JavaScript and Excalidraw canvas APIs. Browser scene updates stay in memory, require the current revision, and are bounded; Pi closes the session server on reload or shutdown. Plan mode permits only `action: "preview"`, which does not start the browser server or write an artifact. Review mode permits the browser viewer only in read-only mode. Use `action: "artifact"` with an explicit project-relative `.excalidraw` path when a durable file is wanted.
 
 The token is the access control for the local session. The server binds only to loopback, serves only the packaged viewer directory, does not execute scene values, and does not send scene data or scripts to a remote service. The token is used in the initial page URL only; the browser then uses the `HttpOnly` session cookie for API requests. The viewer also sends restrictive CSP and referrer policies. Anyone who can read the URL on the same user account can use that live session, so do not share it. The viewer is intentionally limited: it is not a collaboration server, does not persist browser edits by itself, and does not add Herdr embedding or remote access.
 

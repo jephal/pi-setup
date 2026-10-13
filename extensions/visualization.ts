@@ -650,7 +650,7 @@ export default function visualization(pi: ExtensionAPI): void {
 					active.child?.kill();
 				}
 			} finally {
-				await active.endpoint.cleanup();
+				if (active) await active.endpoint.cleanup();
 				closingTerminalViewer = undefined;
 			}
 		})();
@@ -763,7 +763,7 @@ export default function visualization(pi: ExtensionAPI): void {
 			const { action, format, title } = request;
 			const terminalAction = requestClass === "terminal-viewer" || action === "terminal_viewer" || request.target === "terminal_viewer" || request.target === "open" || request.target === "update" || request.target === "status" || request.target === "close";
 			if (approvalMode === "plan" && !isPreviewVisualizationRequest(params)) {
-				throw new Error("Plan mode allows only visualize preview; viewer startup, terminal viewer control, and artifact writes require normal execution mode.");
+				throw new Error("Plan mode allows only visualize preview; viewer startup, terminal viewer control, and artifact writes require approval.");
 			}
 			if (approvalMode === "review" && (terminalAction || action === "artifact")) throw new Error("Review mode does not allow terminal viewer control or artifact writes.");
 			if (terminalAction && request.target === "close") {

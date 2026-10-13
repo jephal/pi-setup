@@ -1,45 +1,43 @@
 /** Shared model-facing plan text for the primary extension and its standalone fallback. */
-export const PLAN_MODE_RESEARCH_GATE =
-	"Use Plan mode only after read-only research and discovery are complete enough to make a decision. The saved plan is the final decision and execution contract, not an initial research log, evidence dump, or unresolved question list. If material uncertainty remains, continue research or ask a focused question before creating the plan.";
+export const PLAN_DISCUSSION_GUIDANCE =
+	"Planning is available in every approval mode. Keep ordinary planning in chat; use the plan tool only when persistent task tracking helps or the user asks for a task list. Inspect repository code or documentation when useful, but do not force a research or grilling session for ordinary tasks. Make reasonable assumptions and ask focused questions only when an important unknown blocks useful or safe progress, or when the user asks to talk the details through. If the user wants a grilling session, continue the conversation until aligned before saving the task list.";
 
-export const PLAN_MODE_WRITING_STYLE =
-	"Full Plan mode plans use decision-first writing: start with `## In short` stating scope, audience, and conclusion plus 3–5 key decisions; follow with `## What happens next`; then cover concise reasoning, alternatives and consequences, trade-offs, and risks; end with the next decision. Use short sections and progressive disclosure, not a wall of text.";
+export const PLAN_FORMAT_GUIDANCE =
+	"Save only a short numbered task list (1., 2., 3.) with concise task names and useful file or documentation anchors when they help. Do not save decision summaries, rationale, prose sections, or large implementation plans. Keep discussion in chat; add more numbered tasks only when the user asks for detail.";
 
-export const PLAN_MODE_TOOL_ACCESS =
-	"Plan mode allows read-only context tools such as note listing/search/read, Fovea, Datadog investigation, scheduled-task listing, safe read-only shell inspection, and visualization previews. It does not write notes or memory, change schedules, run Herdr commands, edit project code, write visualization artifacts, or use unsafe shell commands.";
+export const PLAN_CONTEXT_GUIDANCE =
+	`${PLAN_DISCUSSION_GUIDANCE} ${PLAN_FORMAT_GUIDANCE} Review mode remains read-only: a saved task list does not authorize implementation or code changes.`;
+
+export const STRICT_PLAN_MODE_GUIDANCE =
+	"Plan mode is the strict, read-only workflow for developers who want a gated handoff. Explore safely and discuss details as needed, then save only the numbered task list. Use visualize with action preview only; persistent viewers and artifact writes stay blocked until approval. Wait for the plan review selector before execution; do not start implementation until the user approves.";
 
 export const VISUALIZATION_ALL_MODE_GUIDANCE =
 	"visualize: persistent Excalidraw diagrams belong in Herdr's dedicated visualization-viewer pane, where terminal_viewer open/update/status/close returns compact pane/revision/status acknowledgements; keep Mermaid and preview wireframes in Pi chat. Use the preserved browser viewer only when an external loopback browser URL is explicitly requested; it is non-default and read-only in Review mode. Use artifact only for an explicit project-relative .excalidraw write. No remote or CDN assets are used.";
 
-export const PLAN_MODE_VISUALIZATION_GUIDANCE =
-	"In Plan mode, use visualize with action preview only for a bounded Mermaid preview or Excalidraw wireframe in Pi chat. Persistent Herdr pane control, browser viewer startup, and artifact writes are blocked until normal execution. After approval, put persistent diagrams in Herdr with action terminal_viewer; use the preserved browser viewer only for an explicitly requested external loopback URL, and use action artifact only with an explicit project-relative .excalidraw path.";
-
 export const PLAN_UPDATE_RESPONSE_GUIDANCE =
-	"After updating an existing plan, do not continue silently: explain to the user what changed, why it changed, and the consequence or next step.";
+	"After updating a plan, briefly summarize material changes and the next consequence. Keep that explanation outside the saved plan.";
 
 export const PLAN_BOARD_GUIDANCE =
-	"The Plan Board is a derived display of the authoritative Pi plan. Open it explicitly with plan_board action open; use update, status, or close for its fixed display lifecycle. It renders a bounded Markdown projection with shared Pi styling, preserves Mermaid preprocessing and Excalidraw scenes, and falls back to plain lines safely. never use herdr_shell, Notes, or arbitrary commands for the board. Plan and Review may use this fixed display operation, while approval and HITL decisions remain in Pi.";
+	"The Plan Board is a derived display of the authoritative Pi plan. Open it explicitly with plan_board action open; use update, status, or close for its fixed display lifecycle. It renders a bounded Markdown projection with shared Pi styling, preserves Mermaid preprocessing and Excalidraw scenes, and falls back to plain lines safely. Never use herdr_shell, Notes, or arbitrary commands for the board. In Review mode, board use remains read-only; approval and HITL decisions remain in Pi.";
 
 export const PLAN_TOOL_DESCRIPTION =
-	`Mode-sensitive planning tool. In Plan mode, create and refine a full Markdown implementation plan with review and execution checkpoints. Outside Plan mode, create or update only a small-task checklist; do not use it to plan substantial work. Inspect or clear the current branch plan in either mode. ${PLAN_MODE_RESEARCH_GATE} ${PLAN_MODE_WRITING_STYLE} ${PLAN_BOARD_GUIDANCE}`;
+	`Task-list tool available in every approval mode. Use it only when persistent task tracking helps or the user asks; create or update the short numbered list shown above the editor, not a long-form plan. Plan mode gates the task list before execution; other modes follow their existing permissions. Review mode may save tasks but cannot execute them. Inspect or clear the current branch list in any mode. ${PLAN_CONTEXT_GUIDANCE} ${VISUALIZATION_ALL_MODE_GUIDANCE} ${PLAN_BOARD_GUIDANCE}`;
 
 export const PLAN_TOOL_PROMPT_SNIPPET =
-	"Research first, then use Plan mode for the final decision and execution contract; use only small checklists outside Plan mode";
+	"Optionally save a short numbered task list in any mode when tracking helps; discuss decisions and questions in chat";
 
 export const PLAN_TOOL_PROMPT_GUIDELINES = [
-	"In Plan mode, use create/update for substantial multi-step work with full Markdown, then wait for the review selector before execution.",
-	PLAN_MODE_RESEARCH_GATE,
-	PLAN_MODE_WRITING_STYLE,
-	PLAN_MODE_TOOL_ACCESS,
-	PLAN_MODE_VISUALIZATION_GUIDANCE,
+	PLAN_DISCUSSION_GUIDANCE,
+	PLAN_FORMAT_GUIDANCE,
 	VISUALIZATION_ALL_MODE_GUIDANCE,
 	PLAN_UPDATE_RESPONSE_GUIDANCE,
 	PLAN_BOARD_GUIDANCE,
-	"Outside Plan mode, use create/update only for a short checklist for a small task; provide steps and no full Markdown content.",
-	"Do not use the outside-Plan-mode checklist as a substitute for planning a substantial task. Enter Plan mode first.",
-	"Start full plans with In short (3–5 bullets), then What happens next; put concise technical detail below.",
+	"Review mode remains read-only: a saved plan does not authorize implementation or code changes.",
+	"Use the plan tool only when persistent task tracking helps or the user asks for a task list. Ordinary planning stays in chat.",
+	"Create/update saves only numbered task steps in the above-editor list; pass each task through `steps` so it appears in the view. Keep explanations and design discussion in chat.",
+	"Only in Plan mode, wait for the task-list review selector before execution. In other modes, continue under the current mode's existing permissions.",
 	"Use status to inspect the active branch plan and clear when work is complete or abandoned.",
-	"During approved execution, report each completed checkpoint as [DONE:n] before continuing.",
+	"During execution, report each completed checkpoint as [DONE:n] before continuing.",
 ];
 
 export interface ChecklistStep {
@@ -48,9 +46,34 @@ export interface ChecklistStep {
 	status: string;
 }
 
-export function checklistMarkdown(name: string, steps: readonly ChecklistStep[]): string {
-	const items = steps.map((step) => `- [${["complete", "completed", "done"].includes(step.status.trim().toLowerCase()) ? "x" : " "}] ${step.id}. ${step.title}`);
-	return `# Checklist: ${name}\n\n${items.join("\n")}`;
+export function taskListWidgetLines(steps: readonly ChecklistStep[]): string[] {
+	const isCompleted = (status: string) => ["complete", "completed", "done"].includes(status.trim().toLowerCase());
+	const completed = steps.filter((step) => isCompleted(step.status)).length;
+	return [
+		`Task list · ${completed}/${steps.length} complete`,
+		...steps.map((step) => {
+			const status = step.status.trim().toLowerCase();
+			const marker = isCompleted(status) ? "☑" : status === "in_progress" ? "◐" : "☐";
+			return `${marker} ${step.id}. ${step.title}`;
+		}),
+	];
+}
+
+export function checklistMarkdown(_name: string, steps: readonly ChecklistStep[]): string {
+	return steps.map((step) => `- [${["complete", "completed", "done"].includes(step.status.trim().toLowerCase()) ? "x" : " "}] ${step.id}. ${step.title}`).join("\n");
+}
+
+export function parseChecklistMarkdown(content: string): ChecklistStep[] {
+	const steps: ChecklistStep[] = [];
+	for (const line of content.split(/\r?\n/)) {
+		const match = line.match(/^\s*(?:-\s*)?(?:\[([ xX])\]\s*)?(\d+)[.)]\s+(.+?)\s*$/);
+		if (!match) continue;
+		const id = Number(match[2]);
+		const title = match[3].trim();
+		if (!Number.isSafeInteger(id) || id < 1 || !title || steps.some((step) => step.id === id)) continue;
+		steps.push({ id, title, status: match[1]?.toLowerCase() === "x" ? "completed" : "pending" });
+	}
+	return steps;
 }
 
 export interface PlanChangeSnapshot {
@@ -103,7 +126,7 @@ export function summarizePlanChanges(previous: PlanChangeSnapshot | undefined, n
 		const removedSections = [...previousSections].filter((section) => !nextSections.has(section));
 		if (addedSections.length) changes.push(`Added plan sections: ${listChanges(addedSections)}.`);
 		if (removedSections.length) changes.push(`Removed plan sections: ${listChanges(removedSections)}.`);
-		if (!addedSections.length && !removedSections.length) changes.push("Updated the plan's rationale or supporting details.");
+		if (!addedSections.length && !removedSections.length) changes.push("Updated the plan's content.");
 	}
 
 	return changes.length ? changes.map((change) => `- ${change}`).join("\n") : "- No material changes; the existing plan content and checklist steps are unchanged.";

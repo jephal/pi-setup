@@ -150,15 +150,6 @@ test("viewer action is available in normal execution and its session closes on s
 		body: JSON.stringify({ revision: result.details.revision, scene: buildExcalidrawGraph(graphNodes, graphEdges) }),
 	});
 	assert.equal(reviewWrite.status, 403);
-	handlers.get("approval-mode:changed")?.({ mode: "plan" });
-	const readOnlyWrite = await fetch(new URL("/api/scene", result.details.url), {
-		method: "PUT",
-		headers: { "content-type": "application/json", cookie: page.headers.get("set-cookie")?.split(";", 1)[0] || "" },
-		body: JSON.stringify({ revision: result.details.revision, scene: buildExcalidrawGraph(graphNodes, graphEdges) }),
-	});
-	assert.equal(readOnlyWrite.status, 403);
-	await assert.rejects(tool.execute("viewer-plan", { action: "viewer", format: "excalidraw", nodes: graphNodes }, undefined, undefined, { cwd: process.cwd() }), /Plan mode/);
-	await assert.rejects(tool.execute("artifact-plan", { action: "artifact", format: "excalidraw", nodes: graphNodes, path: "plan.excalidraw" }, undefined, undefined, { cwd: process.cwd() }), /Plan mode/);
 	await handlers.get("session_shutdown")?.();
 	await assert.rejects(fetch(result.details.url));
 });
@@ -210,6 +201,33 @@ test("terminal viewer opens, updates, and closes through its private control soc
 	await handlers.get("session_shutdown")?.();
 });
 
+test("Herdr close during reload is safe when no local terminal viewer exists", async () => {
+	const previousHerdrEnv = process.env.HERDR_ENV;
+	process.env.HERDR_ENV = "1";
+	try {
+		const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+		const emitted: string[] = [];
+		const fakePi = {
+			registerTool(definition: { name: string; execute: (...args: any[]) => Promise<any> }) { definitions.push(definition); },
+			events: {
+				on() {},
+				emit(name: string, value: { respond?: (result: { ok: boolean }) => void }) {
+					emitted.push(name);
+					if (name === "herdr:close-terminal-viewer") value.respond?.({ ok: true });
+				},
+			},
+		};
+		visualization(fakePi as unknown as ExtensionAPI);
+		const tool = definitions.find((definition) => definition.name === "visualize")!;
+		const result = await tool.execute("close-empty-terminal-viewer", { action: "terminal_viewer", target: "close", format: "excalidraw" }, undefined, undefined, { cwd: process.cwd() });
+		assert.equal(result.details.status, "closed");
+		assert.ok(emitted.includes("herdr:close-terminal-viewer"));
+	} finally {
+		if (previousHerdrEnv === undefined) delete process.env.HERDR_ENV;
+		else process.env.HERDR_ENV = previousHerdrEnv;
+	}
+});
+
 test("Review mode allows the browser viewer but keeps it read-only", async () => {
 	const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
 	const handlers = new Map<string, (...args: any[]) => any>();
@@ -230,10 +248,18 @@ test("Review mode allows the browser viewer but keeps it read-only", async () =>
 		body: JSON.stringify({ revision: result.details.revision, scene: buildExcalidrawGraph(graphNodes, graphEdges) }),
 	});
 	assert.equal(write.status, 403);
+	handlers.get("approval-mode:changed")?.({ mode: "plan" });
+	const planWrite = await fetch(new URL("/api/scene", result.details.url), {
+		method: "PUT", headers: { "content-type": "application/json", cookie },
+		body: JSON.stringify({ revision: result.details.revision, scene: buildExcalidrawGraph(graphNodes, graphEdges) }),
+	});
+	assert.equal(planWrite.status, 403);
+	await assert.rejects(tool.execute("plan-viewer", { action: "viewer", format: "excalidraw", nodes: graphNodes }, undefined, undefined, { cwd: process.cwd() }), /Plan mode/);
+	await assert.rejects(tool.execute("plan-artifact", { action: "artifact", format: "excalidraw", nodes: graphNodes, path: "plan.excalidraw" }, undefined, undefined, { cwd: process.cwd() }), /Plan mode/);
 	await handlers.get("session_shutdown")?.();
 });
 
-test("terminal viewer is blocked in Plan and Review modes", async () => {
+test("terminal viewer and artifact writes are blocked in Plan and Review modes", async () => {
 	for (const mode of ["plan", "review"]) {
 		const definitions: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
 		const handlers = new Map<string, (...args: any[]) => any>();
@@ -244,8 +270,9 @@ test("terminal viewer is blocked in Plan and Review modes", async () => {
 		visualization(fakePi as unknown as ExtensionAPI);
 		const tool = definitions.find((definition) => definition.name === "visualize")!;
 		handlers.get("approval-mode:changed")?.({ mode });
-		await assert.rejects(tool.execute("blocked", { action: "terminal_viewer", target: "open", format: "excalidraw", nodes: graphNodes }, undefined, undefined, { cwd: process.cwd() }), new RegExp(`${mode === "plan" ? "Plan" : "Review"} mode`));
-		if (mode === "review") await assert.rejects(tool.execute("blocked-artifact", { action: "artifact", format: "excalidraw", nodes: graphNodes, path: "blocked.excalidraw" }, undefined, undefined, { cwd: process.cwd() }), /Review mode/);
+		const expectedMode = mode === "plan" ? /Plan mode/ : /Review mode/;
+		await assert.rejects(tool.execute("blocked", { action: "terminal_viewer", target: "open", format: "excalidraw", nodes: graphNodes }, undefined, undefined, { cwd: process.cwd() }), expectedMode);
+		await assert.rejects(tool.execute("blocked-artifact", { action: "artifact", format: "excalidraw", nodes: graphNodes, path: "blocked.excalidraw" }, undefined, undefined, { cwd: process.cwd() }), expectedMode);
 	}
 });
 
