@@ -350,6 +350,8 @@ function registerRecallHook(pi: ExtensionAPI): void {
 	pi.on("session_before_fork", resetArchivalSignature);
 	pi.on("session_before_switch", resetArchivalSignature);
 	pi.on("before_agent_start", async (event) => {
+		// Runs started by sendCustomMessage (Pi 1.4+) carry no user prompt.
+		const prompt = typeof event.prompt === "string" ? event.prompt.trim() : "";
 		const settings = await loadSettings();
 		const core = settings.coreMemory
 			? await withStore((store) => store.core({
@@ -361,13 +363,13 @@ function registerRecallHook(pi: ExtensionAPI): void {
 		const coreIds = new Set(core.map((record) => record.id));
 		// Automatic recall is intentionally read-only: only explicit tool and
 		// command searches refresh lastUsedAt/retrievalCount.
-		const archival = settings.autoRecall && event.prompt.trim()
-			? (await withStore((store) => store.search(event.prompt, {
+		const archival = settings.autoRecall && prompt
+			? (await withStore((store) => store.search(prompt, {
 				scopes: ["user"],
 				limit: settings.recallLimit,
 				maxAgeDays: settings.staleAfterDays,
 				recordUsage: false,
-			}))).filter((record) => !coreIds.has(record.id) && isMeaningfullyRelevant(record, event.prompt))
+			}))).filter((record) => !coreIds.has(record.id) && isMeaningfullyRelevant(record, prompt))
 			: [];
 		const lines: string[] = [];
 		if (core.length > 0) {

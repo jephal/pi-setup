@@ -73,6 +73,22 @@ test("recall hook awaits archival search before filtering core memories", async 
 	}
 });
 
+test("before_agent_start tolerates runs without a prompt", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-memory-no-prompt-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = root;
+	try {
+		const handlers = new Map<string, (event: any) => Promise<any>>();
+		const { default: memoryExtension } = await import("./memory.ts");
+		memoryExtension({ registerTool() {}, registerCommand() {}, on(name: string, handler: any) { handlers.set(name, handler); } } as any);
+		await assert.doesNotReject(handlers.get("before_agent_start")!({ systemPrompt: "base" }));
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("automatic recall requires meaningful relevance, does not refresh usage, and avoids unchanged repeats", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-memory-auto-recall-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
